@@ -110,5 +110,15 @@ fn main() {
     let (snapshot_1, _merkle_root_2) = prover(server_db.clone(), merkle_root_1, &operations_2);
 
     // Rerun batch 2 in zkVM.
-    let _merkle_root_2 = verifier(merkle_root_1, &snapshot_1, &operations_2);
+    let merkle_root_2 = verifier(merkle_root_1, &snapshot_1, &operations_2);
+
+    let txn = Transaction::from_snapshot_builder(SnapshotBuilder::<_, u64>::new(
+        server_db,
+        merkle_root_2,
+    ));
+
+    let alice = txn.get(&hash("Alice")).unwrap().unwrap();
+    assert_eq!(*alice, 100);
+    let bob = txn.get(&hash("Bob")).unwrap().unwrap();
+    assert_eq!(*bob, 100);
 }
