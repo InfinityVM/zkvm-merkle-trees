@@ -13,6 +13,163 @@ use super::{DatabaseGet, Idx, Node, NodeHash, Store};
 
 type Result<T, E = TrieError> = core::result::Result<T, E>;
 
+pub struct VerifiedSnapshot<V> {
+    snapshot: Snapshot<V>,
+
+    /// The root hash of the snapshot is the last hash in the slice.
+    /// The indexes of each hash match the indexes of nodes in the snapshot.
+    branch_hashes: Box<[NodeHash]>,
+    leaf_hashes: Box<[NodeHash]>,
+}
+
+impl<V: PortableHash> VerifiedSnapshot<V> {
+    #[inline]
+    pub fn verify_snapshot(
+        snapshot: Snapshot<V>,
+        hasher: &mut impl PortableHasher<32>,
+    ) -> Result<Self> {
+        // Check that the snapshot is well formed.
+        let _ = snapshot.root_node_idx()?;
+
+        let mut leaf_hashes = Vec::with_capacity(snapshot.leaves.len());
+        let mut branch_hashes = Vec::with_capacity(snapshot.branches.len());
+
+        for leaf in snapshot.leaves.iter() {
+            leaf_hashes.push(leaf.hash_leaf(hasher));
+        }
+
+        let leaf_offset = snapshot.branches.len();
+        let unvisited_offset = leaf_offset + snapshot.leaves.len();
+
+        for (idx, branch) in snapshot.branches.iter().enumerate() {
+            let hash_of_child = |child| {
+                if child < idx {
+                    branch_hashes.get(child).ok_or_else(|| {
+                        format!(
+                            "Invalid snapshot: branch {} has child {},
+                            child branch index must be less than parent, branches are not in post-order traversal",
+                            idx, child
+                        )
+                    })
+                } else if child < leaf_offset {
+                    leaf_hashes.get(child).ok_or_else(|| {
+                        format!(
+                            "Invalid snapshot: branch {} has child {},
+                            child leaf does not exist",
+                            idx, child
+                        )
+                    })
+                } else {
+                    snapshot
+                        .unvisited_nodes
+                        .get(child - unvisited_offset)
+                        .ok_or_else(|| {
+                            format!(
+                                "Invalid snapshot: branch {} has child {},
+                                child unvisited node does not exist",
+                                idx, child
+                            )
+                        })
+                }
+            };
+
+            let left_hash = hash_of_child(branch.left as usize)?;
+            let right_hash = hash_of_child(branch.right as usize)?;
+
+            branch_hashes.push(branch.hash_branch(hasher, left_hash, right_hash));
+        }
+
+        Ok(VerifiedSnapshot {
+            snapshot,
+            branch_hashes: branch_hashes.into_boxed_slice(),
+            leaf_hashes: leaf_hashes.into_boxed_slice(),
+        })
+    }
+
+    #[inline]
+    pub fn trie_root(&self) -> TrieRoot<NodeRef<V>> {
+        if !self.snapshot.branches.is_empty() {
+            TrieRoot::Node(NodeRef::Stored(self.snapshot.branches.len() as Idx - 1))
+        } else {
+            // We know that the snapshot is valid, because we verified it in `verify_snapshot`.
+            // If a snapshot contains no branches a single leaf or a single unvisited node is a valid snapshot.
+            // Any other combination is invalid.
+            debug_assert_eq!(
+                self.snapshot.leaves.len() + self.snapshot.unvisited_nodes.len(),
+                1
+            );
+            TrieRoot::Node(NodeRef::Stored(0))
+        }
+    }
+}
+
+impl<V> Store<V> for VerifiedSnapshot<V> {
+    type Error = TrieError;
+
+    #[inline]
+    fn calc_subtree_hash(
+        &self,
+        _: &mut impl PortableHasher<32>,
+        node: Idx,
+    ) -> Result<NodeHash, Self::Error> {
+        let idx = node as usize;
+        let leaf_offset = self.snapshot.branches.len();
+        let unvisited_offset = leaf_offset + self.snapshot.leaves.len();
+
+        if let Some(branch) = self.branch_hashes.get(idx) {
+            Ok(*branch)
+        } else if let Some(leaf) = self.leaf_hashes.get(idx - leaf_offset) {
+            Ok(*leaf)
+        } else if let Some(hash) = self.snapshot.unvisited_nodes.get(idx - unvisited_offset) {
+            Ok(*hash)
+        } else {
+            Err(format!(
+                "Invalid arg: node {} does not exist\n\
+                Snapshot has {} nodes",
+                idx,
+                self.snapshot.branches.len()
+                    + self.snapshot.leaves.len()
+                    + self.snapshot.unvisited_nodes.len(),
+            )
+            .into())
+        }
+    }
+
+    #[inline]
+    fn get_node(&self, idx: Idx) -> Result<Node<&Branch<Idx>, &Leaf<V>>> {
+        let idx = idx as usize;
+        let leaf_offset = self.snapshot.branches.len();
+        let unvisited_offset = leaf_offset + self.snapshot.leaves.len();
+
+        if let Some(branch) = self.snapshot.branches.get(idx) {
+            Ok(Node::Branch(branch))
+        } else if let Some(leaf) = self.snapshot.leaves.get(idx - leaf_offset) {
+            Ok(Node::Leaf(leaf))
+        } else if self
+            .snapshot
+            .unvisited_nodes
+            .get(idx - unvisited_offset)
+            .is_some()
+        {
+            Err(format!(
+                "Invalid arg: node {idx} is unvisited\n\
+                get_node can only return visited nodes"
+            )
+            .into())
+        } else {
+            Err(format!(
+                "Invalid arg: node {} does not exist\n\
+                Snapshot has {} nodes",
+                idx,
+                self.snapshot.branches.len()
+                    + self.snapshot.leaves.len()
+                    + self.snapshot.unvisited_nodes.len(),
+            )
+            .into())
+        }
+    }
+}
+
 /// A snapshot of the merkle trie
 ///
 /// Contains visited nodes and unvisited nodes
@@ -39,8 +196,9 @@ impl<V: PortableHash> Snapshot<V> {
         ) {
             // A empty tree
             ([], [], []) => Ok(TrieRoot::Empty),
-            // A tree with only one node
-            ([_], [], []) | ([], [_], []) | ([], [], [_]) => Ok(TrieRoot::Node(0)),
+            // A tree with only one node, it must be a leaf or unvisited node.
+            // It can't be a branch because branches have children.
+            ([], [_], []) | ([], [], [_]) => Ok(TrieRoot::Node(0)),
             (branches, _, _) if !branches.is_empty() => {
                 Ok(TrieRoot::Node(branches.len() as Idx - 1))
             }
