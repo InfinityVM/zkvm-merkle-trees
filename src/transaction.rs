@@ -4,6 +4,7 @@ use alloc::borrow::Cow;
 use alloc::{boxed::Box, format};
 use core::mem;
 
+use crate::stored::merkle::VerifiedSnapshot;
 use crate::stored::DatabaseGet;
 use crate::{stored, KeyHash, NodeHash, PortableHash, PortableHasher};
 use crate::{
@@ -18,12 +19,12 @@ use self::nodes::{
     Branch, KeyPosition, KeyPositionAdjacent, Leaf, Node, NodeRef, StoredLeafRef, TrieRoot,
 };
 
-pub struct Transaction<S, V> {
+pub struct Transaction<S: Store> {
     pub data_store: S,
-    current_root: TrieRoot<NodeRef<V>>,
+    current_root: TrieRoot<NodeRef<S::Value>>,
 }
 
-impl<Db: DatabaseSet<V>, V: Clone + PortableHash> Transaction<SnapshotBuilder<Db, V>, V> {
+impl<Db: DatabaseSet<V>, V: Clone + PortableHash> Transaction<SnapshotBuilder<Db, V>> {
     /// Write modified nodes to the database and return the root hash.
     /// Calling this method will write all modified nodes to the database.
     /// Calling this method again will rewrite the nodes to the database.
@@ -65,7 +66,7 @@ impl<Db: DatabaseSet<V>, V: Clone + PortableHash> Transaction<SnapshotBuilder<Db
     }
 }
 
-impl<S: Store<V>, V: PortableHash> Transaction<S, V> {
+impl<S: Store> Transaction<S> {
     /// Caller must ensure that the hasher is reset before calling this method.
     #[inline]
     pub fn calc_root_hash_inner(
@@ -73,11 +74,11 @@ impl<S: Store<V>, V: PortableHash> Transaction<S, V> {
         hasher: &mut impl PortableHasher<32>,
         on_modified_branch: &mut impl FnMut(
             &NodeHash,
-            &Branch<NodeRef<V>>,
+            &Branch<NodeRef<S::Value>>,
             NodeHash,
             NodeHash,
         ) -> Result<(), TrieError>,
-        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<V>) -> Result<(), TrieError>,
+        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<S::Value>) -> Result<(), TrieError>,
     ) -> Result<TrieRoot<NodeHash>, TrieError> {
         let root_hash = match &self.current_root {
             TrieRoot::Empty => return Ok(TrieRoot::Empty),
@@ -108,11 +109,11 @@ impl<S: Store<V>, V: PortableHash> Transaction<S, V> {
     fn calc_root_hash_node(
         hasher: &mut impl PortableHasher<32>,
         data_store: &S,
-        node_ref: &NodeRef<V>,
-        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<V>) -> Result<(), TrieError>,
+        node_ref: &NodeRef<S::Value>,
+        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<S::Value>) -> Result<(), TrieError>,
         on_modified_branch: &mut impl FnMut(
             &NodeHash,
-            &Branch<NodeRef<V>>,
+            &Branch<NodeRef<S::Value>>,
             NodeHash,
             NodeHash,
         ) -> Result<(), TrieError>,
@@ -160,7 +161,7 @@ impl<S: Store<V>, V: PortableHash> Transaction<S, V> {
     }
 }
 
-impl<Db: 'static + DatabaseGet<V>, V: Clone> Transaction<SnapshotBuilder<Db, V>, V> {
+impl<Db: 'static + DatabaseGet<V>, V: Clone + PortableHash> Transaction<SnapshotBuilder<Db, V>> {
     /// This method is like standard `Transaction::get` but won't affect the Transaction or any Snapshot built from it.
     /// You should use this method to check precondition before modifying the Transaction.
     ///
@@ -244,9 +245,9 @@ impl<Db: 'static + DatabaseGet<V>, V: Clone> Transaction<SnapshotBuilder<Db, V>,
     }
 }
 
-impl<S: Store<V>, V> Transaction<S, V> {
+impl<S: Store> Transaction<S> {
     #[inline]
-    pub fn get(&self, key_hash: &KeyHash) -> Result<Option<&V>, TrieError> {
+    pub fn get(&self, key_hash: &KeyHash) -> Result<Option<&S::Value>, TrieError> {
         match &self.current_root {
             TrieRoot::Empty => Ok(None),
             TrieRoot::Node(node_ref) => Self::get_node(&self.data_store, node_ref, key_hash),
@@ -256,9 +257,9 @@ impl<S: Store<V>, V> Transaction<S, V> {
     #[inline]
     fn get_node<'root, 's: 'root>(
         data_store: &'s S,
-        mut node_ref: &'root NodeRef<V>,
+        mut node_ref: &'root NodeRef<S::Value>,
         key_hash: &KeyHash,
-    ) -> Result<Option<&'root V>, TrieError> {
+    ) -> Result<Option<&'root S::Value>, TrieError> {
         loop {
             match node_ref {
                 NodeRef::ModBranch(branch) => match branch.key_position(key_hash) {
@@ -285,7 +286,7 @@ impl<S: Store<V>, V> Transaction<S, V> {
         data_store: &'s S,
         mut stored_idx: stored::Idx,
         key_hash: &KeyHash,
-    ) -> Result<Option<&'s V>, TrieError> {
+    ) -> Result<Option<&'s S::Value>, TrieError> {
         loop {
             let node = data_store
                 .get_node(stored_idx)
@@ -317,7 +318,7 @@ impl<S: Store<V>, V> Transaction<S, V> {
     }
 
     #[inline]
-    pub fn insert(&mut self, key_hash: &KeyHash, value: V) -> Result<(), TrieError> {
+    pub fn insert(&mut self, key_hash: &KeyHash, value: S::Value) -> Result<(), TrieError> {
         match &mut self.current_root {
             TrieRoot::Empty => {
                 self.current_root = TrieRoot::Node(NodeRef::ModLeaf(Box::new(Leaf {
@@ -335,9 +336,9 @@ impl<S: Store<V>, V> Transaction<S, V> {
     #[inline(always)]
     fn insert_node<'root, 's: 'root>(
         data_store: &'s mut S,
-        mut node_ref: &'root mut NodeRef<V>,
+        mut node_ref: &'root mut NodeRef<S::Value>,
         key_hash: &KeyHash,
-        value: V,
+        value: S::Value,
     ) -> Result<(), TrieError> {
         loop {
             match node_ref {
@@ -430,7 +431,7 @@ impl<S: Store<V>, V> Transaction<S, V> {
     }
 }
 
-impl<S: Store<V>, V: PortableHash + Clone> Transaction<S, V> {
+impl<S: Store> Transaction<S> {
     /// This method allows for getting, inserting, and updating a entry in the trie with a single lookup.
     /// We match the standard library's `Entry` API for the most part.
     ///
@@ -438,7 +439,10 @@ impl<S: Store<V>, V: PortableHash + Clone> Transaction<S, V> {
     /// This incurs allocations, now and unnecessary rehashing later when calculating the root hash.
     /// For this reason you should prefer `get` if you have a high probability of not modifying the entry.
     #[inline]
-    pub fn entry<'txn>(&'txn mut self, key_hash: &KeyHash) -> Result<Entry<'txn, V>, TrieError> {
+    pub fn entry<'txn>(
+        &'txn mut self,
+        key_hash: &KeyHash,
+    ) -> Result<Entry<'txn, S::Value>, TrieError> {
         let mut key_position = KeyPositionAdjacent::PrefixOfWord(usize::MAX);
 
         match self.current_root {
@@ -528,7 +532,7 @@ impl<S: Store<V>, V: PortableHash + Clone> Transaction<S, V> {
     }
 }
 
-impl<Db, V: PortableHash + Clone> Transaction<SnapshotBuilder<Db, V>, V> {
+impl<Db: DatabaseGet<V>, V: PortableHash + Clone> Transaction<SnapshotBuilder<Db, V>> {
     /// An alias for `SnapshotBuilder::new_with_db`.
     ///
     /// Builds a snapshot of the trie before the transaction.
@@ -551,8 +555,8 @@ impl<Db, V: PortableHash + Clone> Transaction<SnapshotBuilder<Db, V>, V> {
     }
 }
 
-impl<Db, V: PortableHash + Clone> TryFrom<SnapshotBuilder<Db, V>>
-    for Transaction<SnapshotBuilder<Db, V>, V>
+impl<Db: DatabaseGet<V>, V: PortableHash + Clone> TryFrom<SnapshotBuilder<Db, V>>
+    for Transaction<SnapshotBuilder<Db, V>>
 {
     type Error = TrieError;
 
@@ -562,10 +566,10 @@ impl<Db, V: PortableHash + Clone> TryFrom<SnapshotBuilder<Db, V>>
     }
 }
 
-impl<'s, V: PortableHash + Clone> Transaction<&'s Snapshot<V>, V> {
+impl<'s, V: PortableHash + Clone> Transaction<&'s Snapshot<V>> {
     /// Create a `Transaction` from a borrowed `Snapshot`.
     #[inline]
-    pub fn from_snapshot(snapshot: &'s Snapshot<V>) -> Result<Self, TrieError> {
+    pub fn from_unverified_snapshot_ref(snapshot: &'s Snapshot<V>) -> Result<Self, TrieError> {
         Ok(Transaction {
             current_root: snapshot.trie_root()?,
             data_store: snapshot,
@@ -573,10 +577,10 @@ impl<'s, V: PortableHash + Clone> Transaction<&'s Snapshot<V>, V> {
     }
 }
 
-impl<V: PortableHash + Clone> Transaction<Snapshot<V>, V> {
+impl<V: PortableHash + Clone> Transaction<Snapshot<V>> {
     /// Create a `Transaction` from a owned `Snapshot`.
     #[inline]
-    pub fn from_snapshot_owned(snapshot: Snapshot<V>) -> Result<Self, TrieError> {
+    pub fn from_unverified_snapshot(snapshot: Snapshot<V>) -> Result<Self, TrieError> {
         Ok(Transaction {
             current_root: snapshot.trie_root()?,
             data_store: snapshot,
@@ -584,21 +588,61 @@ impl<V: PortableHash + Clone> Transaction<Snapshot<V>, V> {
     }
 }
 
-impl<'s, V: PortableHash + Clone> TryFrom<&'s Snapshot<V>> for Transaction<&'s Snapshot<V>, V> {
+impl<'s, V: PortableHash + Clone> TryFrom<&'s Snapshot<V>> for Transaction<&'s Snapshot<V>> {
     type Error = TrieError;
 
     #[inline]
     fn try_from(value: &'s Snapshot<V>) -> Result<Self, Self::Error> {
-        Self::from_snapshot(value)
+        Self::from_unverified_snapshot_ref(value)
     }
 }
 
-impl<V: PortableHash + Clone> TryFrom<Snapshot<V>> for Transaction<Snapshot<V>, V> {
+impl<V: PortableHash + Clone> TryFrom<Snapshot<V>> for Transaction<Snapshot<V>> {
     type Error = TrieError;
 
     #[inline]
     fn try_from(value: Snapshot<V>) -> Result<Self, Self::Error> {
-        Self::from_snapshot_owned(value)
+        Self::from_unverified_snapshot(value)
+    }
+}
+
+impl<'s, S: Store + AsRef<Snapshot<S::Value>>> Transaction<&'s VerifiedSnapshot<S>> {
+    /// Create a `Transaction` from a borrowed `VerifiedSnapshot`.
+    #[inline]
+    pub fn from_verified_snapshot_ref(snapshot: &'s VerifiedSnapshot<S>) -> Self {
+        Transaction {
+            current_root: snapshot.trie_root(),
+            data_store: snapshot,
+        }
+    }
+}
+
+impl<S: Store + AsRef<Snapshot<S::Value>>> Transaction<VerifiedSnapshot<S>> {
+    /// Create a `Transaction` from a owned `VerifiedSnapshot`.
+    #[inline]
+    pub fn from_verified_snapshot(snapshot: VerifiedSnapshot<S>) -> Self {
+        Transaction {
+            current_root: snapshot.trie_root(),
+            data_store: snapshot,
+        }
+    }
+}
+
+impl<'s, S: Store + AsRef<Snapshot<S::Value>>> From<&'s VerifiedSnapshot<S>>
+    for Transaction<&'s VerifiedSnapshot<S>>
+{
+    #[inline]
+    fn from(value: &'s VerifiedSnapshot<S>) -> Self {
+        Transaction::from_verified_snapshot_ref(value)
+    }
+}
+
+impl<S: Store + AsRef<Snapshot<S::Value>>> From<VerifiedSnapshot<S>>
+    for Transaction<VerifiedSnapshot<S>>
+{
+    #[inline]
+    fn from(value: VerifiedSnapshot<S>) -> Self {
+        Transaction::from_verified_snapshot(value)
     }
 }
 

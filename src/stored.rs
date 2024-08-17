@@ -7,13 +7,14 @@ use alloc::{rc::Rc, sync::Arc};
 
 use crate::{
     transaction::nodes::{Branch, Leaf, Node},
-    NodeHash, PortableHasher,
+    NodeHash, PortableHash, PortableHasher,
 };
 
 pub type Idx = u32;
 
-pub trait Store<V> {
+pub trait Store {
     type Error: Display;
+    type Value: Clone + PortableHash;
 
     fn calc_subtree_hash(
         &self,
@@ -21,11 +22,15 @@ pub trait Store<V> {
         hash_idx: Idx,
     ) -> Result<NodeHash, Self::Error>;
 
-    fn get_node(&self, hash_idx: Idx) -> Result<Node<&Branch<Idx>, &Leaf<V>>, Self::Error>;
+    fn get_node(
+        &self,
+        hash_idx: Idx,
+    ) -> Result<Node<&Branch<Idx>, &Leaf<Self::Value>>, Self::Error>;
 }
 
-impl<V, S: Store<V>> Store<V> for &S {
+impl<S: Store> Store for &S {
     type Error = S::Error;
+    type Value = S::Value;
 
     #[inline(always)]
     fn calc_subtree_hash(
@@ -38,13 +43,17 @@ impl<V, S: Store<V>> Store<V> for &S {
     }
 
     #[inline(always)]
-    fn get_node(&self, hash_idx: Idx) -> Result<Node<&Branch<Idx>, &Leaf<V>>, Self::Error> {
+    fn get_node(
+        &self,
+        hash_idx: Idx,
+    ) -> Result<Node<&Branch<Idx>, &Leaf<Self::Value>>, Self::Error> {
         (**self).get_node(hash_idx)
     }
 }
 
-impl<V, S: Store<V>> Store<V> for Rc<S> {
+impl<S: Store> Store for Rc<S> {
     type Error = S::Error;
+    type Value = S::Value;
 
     #[inline(always)]
     fn calc_subtree_hash(
@@ -56,13 +65,17 @@ impl<V, S: Store<V>> Store<V> for Rc<S> {
     }
 
     #[inline(always)]
-    fn get_node(&self, hash_idx: Idx) -> Result<Node<&Branch<Idx>, &Leaf<V>>, Self::Error> {
+    fn get_node(
+        &self,
+        hash_idx: Idx,
+    ) -> Result<Node<&Branch<Idx>, &Leaf<Self::Value>>, Self::Error> {
         (**self).get_node(hash_idx)
     }
 }
 
-impl<V, S: Store<V>> Store<V> for Arc<S> {
+impl<S: Store> Store for Arc<S> {
     type Error = S::Error;
+    type Value = S::Value;
 
     #[inline(always)]
     fn calc_subtree_hash(
@@ -74,7 +87,10 @@ impl<V, S: Store<V>> Store<V> for Arc<S> {
     }
 
     #[inline(always)]
-    fn get_node(&self, hash_idx: Idx) -> Result<Node<&Branch<Idx>, &Leaf<V>>, Self::Error> {
+    fn get_node(
+        &self,
+        hash_idx: Idx,
+    ) -> Result<Node<&Branch<Idx>, &Leaf<Self::Value>>, Self::Error> {
         (**self).get_node(hash_idx)
     }
 }

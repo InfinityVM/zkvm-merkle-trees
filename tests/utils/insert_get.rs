@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use kairos_trie::{
     stored::{
-        merkle::{Snapshot, SnapshotBuilder},
+        merkle::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
         DatabaseSet,
     },
     DigestHasher, KeyHash, NodeHash, Transaction, TrieRoot,
@@ -37,14 +37,13 @@ pub fn run_against_snapshot(
     new_root_hash: TrieRoot<NodeHash>,
     old_root_hash: TrieRoot<NodeHash>,
 ) {
-    assert_eq!(
-        old_root_hash,
-        snapshot
-            .calc_root_hash(&mut DigestHasher::<Sha256>::default())
-            .unwrap()
-    );
+    let mut hasher = &mut DigestHasher::<Sha256>::default();
 
-    let mut txn = Transaction::from_snapshot(&snapshot).unwrap();
+    assert_eq!(old_root_hash, snapshot.calc_root_hash(hasher).unwrap());
+
+    let mut txn = Transaction::from_verified_snapshot(
+        VerifiedSnapshot::verify_snapshot(snapshot, hasher).unwrap(),
+    );
 
     for (key, value) in new.iter() {
         txn.insert(key, value.to_le_bytes()).unwrap();
