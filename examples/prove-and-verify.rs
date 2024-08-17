@@ -3,7 +3,7 @@ use std::rc::Rc;
 use kairos_trie::{
     stored::{
         memory_db::MemoryDb,
-        merkle::{Snapshot, SnapshotBuilder},
+        merkle::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
         Store,
     },
     DigestHasher, KeyHash, NodeHash, PortableHash, PortableHasher, Transaction, TrieRoot,
@@ -21,7 +21,7 @@ fn hash(key: &str) -> KeyHash {
     KeyHash::from_bytes(&hasher.finalize_reset())
 }
 
-fn apply_operations(txn: &mut Transaction<impl Store<u64>, u64>, operations: &[Ops]) {
+fn apply_operations(txn: &mut Transaction<impl Store<Value = u64>>, operations: &[Ops]) {
     for op in operations {
         match op {
             Ops::Add(key, value) => {
@@ -72,7 +72,9 @@ fn verifier(
 ) -> TrieRoot<NodeHash> {
     let hasher = &mut DigestHasher::<Sha256>::default();
 
-    let mut txn = Transaction::from_snapshot(snapshot).unwrap();
+    let mut txn = Transaction::from_verified_snapshot(
+        VerifiedSnapshot::verify_snapshot(snapshot, hasher).unwrap(),
+    );
 
     let pre_batch_trie_root = txn.calc_root_hash(hasher).unwrap();
     // Assert that the trie started the transaction with the correct root hash.

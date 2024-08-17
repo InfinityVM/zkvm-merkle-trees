@@ -10,7 +10,7 @@ use proptest::{prelude::*, sample::SizeRange};
 use kairos_trie::{
     stored::{
         memory_db::MemoryDb,
-        merkle::{Snapshot, SnapshotBuilder},
+        merkle::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
         Store,
     },
     DigestHasher, KeyHash, NodeHash, Transaction, TrieRoot,
@@ -132,8 +132,15 @@ pub fn run_against_snapshot(
             .unwrap()
     );
 
+    let verified_snapshot =
+        VerifiedSnapshot::verify_snapshot(&snapshot, &mut DigestHasher::<Sha256>::default())
+            .unwrap();
+
+    assert_eq!(old_root_hash, verified_snapshot.trie_root_hash());
+
     // Create a transaction against the snapshot at the old root hash
-    let mut txn = Transaction::from_snapshot(&snapshot).unwrap();
+    // let mut txn = Transaction::from_verified_snapshot(verified_snapshot);
+    let mut txn = Transaction::from_unverified_snapshot(snapshot).unwrap();
 
     // Apply the operations to the transaction
     for op in batch {
@@ -150,9 +157,9 @@ pub fn run_against_snapshot(
     assert_eq!(root_hash, new_root_hash);
 }
 
-fn trie_op<S: Store<Value>>(
+fn trie_op<S: Store<Value = [u8; 8]>>(
     op: &Operation,
-    txn: &mut Transaction<S, Value>,
+    txn: &mut Transaction<S>,
 ) -> (Option<Value>, Option<Value>) {
     match op {
         Operation::Insert(key, value) => {
