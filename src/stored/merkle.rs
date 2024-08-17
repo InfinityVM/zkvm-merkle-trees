@@ -54,18 +54,18 @@ impl<S: Store + AsRef<Snapshot<S::Value>>> VerifiedSnapshot<S> {
 
         for (idx, branch) in snapshot_ref.branches.iter().enumerate() {
             let hash_of_child = |child| {
-                if child < idx {
+                if child < leaf_offset {
                     branch_hashes.get(child).ok_or_else(|| {
                         format!(
-                            "Invalid snapshot: branch {} has child {},
+                            "Invalid snapshot: branch {} has child {},\
                             child branch index must be less than parent, branches are not in post-order traversal",
                             idx, child
                         )
                     })
-                } else if child < leaf_offset {
-                    leaf_hashes.get(child).ok_or_else(|| {
+                } else if child < unvisited_offset {
+                    leaf_hashes.get(child - leaf_offset).ok_or_else(|| {
                         format!(
-                            "Invalid snapshot: branch {} has child {},
+                            "Invalid snapshot: branch {} has child {},\
                             child leaf does not exist",
                             idx, child
                         )
@@ -76,7 +76,7 @@ impl<S: Store + AsRef<Snapshot<S::Value>>> VerifiedSnapshot<S> {
                         .get(child - unvisited_offset)
                         .ok_or_else(|| {
                             format!(
-                                "Invalid snapshot: branch {} has child {},
+                                "Invalid snapshot: branch {} has child {},\
                                 child unvisited node does not exist",
                                 idx, child
                             )
