@@ -72,13 +72,13 @@ fn verifier(
 ) -> TrieRoot<NodeHash> {
     let hasher = &mut DigestHasher::<Sha256>::default();
 
-    let mut txn = Transaction::from_verified_snapshot(
-        VerifiedSnapshot::verify_snapshot(snapshot, hasher).unwrap(),
-    );
+    let verified_snapshot = VerifiedSnapshot::verify_snapshot(snapshot, hasher).unwrap();
 
-    let pre_batch_trie_root = txn.calc_root_hash(hasher).unwrap();
+    let pre_batch_trie_root = verified_snapshot.trie_root_hash();
     // Assert that the trie started the transaction with the correct root hash.
     assert_eq!(pre_batch_trie_root, pre_txn_merkle_root);
+
+    let mut txn = Transaction::from(verified_snapshot);
 
     // Replay the exact same operations inside the zkVM.
     // The business logic is entirely identical.
