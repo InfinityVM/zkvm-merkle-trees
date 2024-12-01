@@ -1,0 +1,27 @@
+[package]
+name = "kairos-trie"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+std = []
+serde = ["dep:serde"]
+
+[dependencies]
+digest = "0.10"
+bumpalo = "3"
+ouroboros = "0.18"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+
+
+[dev-dependencies]
+sha2 = "0.10"
+proptest-derive = { version = "0.5" }
+proptest = { version = "1" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "against_snapshot"
+harness = false
