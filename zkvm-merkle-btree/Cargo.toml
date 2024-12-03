@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+kairos-trie = { path = "../kairos-trie" }
+
+arrayvec = "0.7"
+imbl = "3.0.0"
+
+[dev-dependencies]
+proptest-derive = { version = "0.5" }
+proptest = { version = "1" }
