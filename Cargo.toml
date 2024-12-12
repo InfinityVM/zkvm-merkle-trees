@@ -9,6 +9,6 @@ members = [
 
 
 [profile.test]
-opt-level = 3
+# opt-level = 3
 debug-assertions = true
 overflow-checks = true

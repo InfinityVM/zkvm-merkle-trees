@@ -5,3 +5,10 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f0e11b2012d48068fdab637d312d0074f879f3465dabbbbbe04fe12485fac40b # shrinks to operations = [Insert(0, 0)]
+cc 00fa63a749cf7ada99926a691d2975ee07d841ebcd55cb9bbce0889cc01f11f8 # shrinks to operations = [Insert(0, 0), Insert(261, 0), Delete(261)]
+cc 4357055177d85e965bf0c256cd528af8e5849172fb7835da060bbf566e5bc36b # shrinks to operations = [Insert(0, 0), Insert(1, 0), Insert(2, 0), Insert(3, 0), Insert(257, 0), Insert(63, 0), Insert(4, 0), Insert(5, 0), Insert(64, 0), Insert(65, 0), Insert(66, 0), Insert(67, 0), Insert(6, 0), Delete(257)]
+cc c3eb358f853058b87db53dc97da9cf0d0f7e29df9e0c84721f7ba51161fe8b21 # shrinks to operations = [Insert(119, 0), Insert(887, 0), Insert(0, 0), Insert(1, 0), Insert(2, 0), Insert(120, 0), Insert(3, 0), Delete(887)]
+cc 704d5cfe27b825a73629797089b82f4c9e833dee9006767ad6d19c48529c4b29 # shrinks to operations = [Insert(0, 0), Insert(1, 0), Insert(335, 0), Insert(422, 0), Insert(423, 0), Insert(424, 0), Insert(2, 0), Insert(425, 0), Delete(422)]
+cc 061ee4e8edc3c0a2c8ca7f4833c497106b9bda558a1b405699fb80ced458727f # shrinks to operations = [Insert(826, 0), Insert(0, 0), Insert(161, 0), Insert(1, 0), Insert(2, 0), Delete(826), Insert(0, 0)]
+cc ff253e3e4c9475d4537fec8a0c557961ed3a54a5c377015545f40e74a823b20d # shrinks to operations = [Insert(616, 0), Insert(368, 0), Insert(0, 0), Insert(1, 0), Insert(777, 0), Insert(778, 0), Insert(617, 0), Insert(618, 0), Insert(0, 0), Insert(2, 0), Insert(3, 0), Insert(619, 0), Insert(620, 0), Delete(616)]
+cc 073cfb64c28e437848a940ed256d9f057b63bda4e37329daecf31d7e907504e3 # shrinks to operations = [Insert(0, 0), Insert(1, 0), Insert(2, 0), Insert(3, 0), Insert(4, 0), Insert(580, 0), Insert(581, 0), Insert(582, 0), Insert(5, 0), Insert(527, 0), Insert(6, 0), Delete(527), Insert(527, 0), Insert(6, 0)]
