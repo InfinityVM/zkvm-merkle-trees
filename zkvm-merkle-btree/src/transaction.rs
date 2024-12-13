@@ -403,18 +403,12 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     if idx == 0 {
                         let hash_idx = node.children[1].stored().unwrap();
                         node.children[1] = NodeRef::Node(
-                            data_store
-                                .get(hash_idx)?
-                                .try_into()
-                                .expect("unbalanced node"),
+                            (*data_store.get(hash_idx)?.node().expect("unbalanced node")).clone(),
                         );
                     } else {
                         let hash_idx = node.children[idx - 1].stored().unwrap();
                         node.children[idx - 1] = NodeRef::Node(
-                            data_store
-                                .get(hash_idx)?
-                                .try_into()
-                                .expect("unbalanced node"),
+                            (*data_store.get(hash_idx)?.node().expect("unbalanced node")).clone(),
                         );
                         // We just added a sibling node to the tree
                         node.merge_or_balance(idx).unwrap()
@@ -445,6 +439,86 @@ impl<S: Store> MerkleBTreeTxn<S> {
             }
             _ => {
                 unreachable!("Underflow is only returned from visiting a node or leaf")
+            }
+        }
+    }
+
+    pub fn first_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        let mut node = match &self.current_root {
+            NodeRef::Node(node) => node,
+            NodeRef::Leaf(leaf) => return Ok(Some((&leaf.key, &leaf.value))),
+            NodeRef::Stored(idx) => {
+                let node_or_leaf = self.data_store.get(*idx)?;
+                match node_or_leaf {
+                    NodeOrLeaf::Node(stored_node) => stored_node,
+                    NodeOrLeaf::Leaf(leaf) => {
+                        return Ok(Some((&leaf.key, &leaf.value)));
+                    }
+                }
+            }
+            NodeRef::Null => return Ok(None),
+        };
+
+        loop {
+            match &node.children.first().unwrap() {
+                NodeRef::Node(child) => {
+                    node = child;
+                }
+                NodeRef::Leaf(leaf) => {
+                    return Ok(Some((&leaf.key, &leaf.value)));
+                }
+                NodeRef::Stored(idx) => {
+                    let node_or_leaf = self.data_store.get(*idx)?;
+                    match node_or_leaf {
+                        NodeOrLeaf::Node(stored_node) => node = stored_node,
+                        NodeOrLeaf::Leaf(leaf) => {
+                            return Ok(Some((&leaf.key, &leaf.value)));
+                        }
+                    }
+                }
+                NodeRef::Null => {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    pub fn last_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        let mut node = match &self.current_root {
+            NodeRef::Node(node) => node,
+            NodeRef::Leaf(leaf) => return Ok(Some((&leaf.key, &leaf.value))),
+            NodeRef::Stored(idx) => {
+                let node_or_leaf = self.data_store.get(*idx)?;
+                match node_or_leaf {
+                    NodeOrLeaf::Node(stored_node) => stored_node,
+                    NodeOrLeaf::Leaf(leaf) => {
+                        return Ok(Some((&leaf.key, &leaf.value)));
+                    }
+                }
+            }
+            NodeRef::Null => return Ok(None),
+        };
+
+        loop {
+            match &node.children.last().unwrap() {
+                NodeRef::Node(child) => {
+                    node = child;
+                }
+                NodeRef::Leaf(leaf) => {
+                    return Ok(Some((&leaf.key, &leaf.value)));
+                }
+                NodeRef::Stored(idx) => {
+                    let node_or_leaf = self.data_store.get(*idx)?;
+                    match node_or_leaf {
+                        NodeOrLeaf::Node(stored_node) => node = stored_node,
+                        NodeOrLeaf::Leaf(leaf) => {
+                            return Ok(Some((&leaf.key, &leaf.value)));
+                        }
+                    }
+                }
+                NodeRef::Null => {
+                    return Ok(None);
+                }
             }
         }
     }
@@ -534,11 +608,13 @@ mod test {
 
     use crate::transaction::MerkleBTreeTxn;
 
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     enum Op {
         Insert(u32, u32),
         Get(u32),
         Delete(u32),
+        GetFirstKeyValue,
+        GetLastKeyValue,
     }
 
     fn run_operations(operations: Vec<Op>) {
@@ -568,18 +644,32 @@ mod test {
                         "delete failed for key: {}, merkle btree returned {:?}, btreemap returned {:?}",
                         k, res_txn, res_std);
                 }
+                Op::GetFirstKeyValue => {
+                    let res_txn = txn_btree.first_key_value().unwrap();
+                    let res_std = std_btree.first_key_value();
+                    assert_eq!(res_txn, res_std,
+                        "get first key value failed, merkle btree returned {:?}, btreemap returned {:?}",
+                        res_txn, res_std);
+                }
+                Op::GetLastKeyValue => {
+                    let res_txn = txn_btree.last_key_value().unwrap();
+                    let res_std = std_btree.last_key_value();
+                    assert_eq!(res_txn, res_std,
+                        "get last key value failed, merkle btree returned {:?}, btreemap returned {:?}",
+                        res_txn, res_std);
+                }
             }
         }
     }
 
     #[test]
-    fn test_insert_1() {
+    fn test_hardcoded_1_insert() {
         let operations = vec![Op::Insert(0, 0), Op::Insert(1, 0), Op::Insert(2, 0)];
         run_operations(operations);
     }
 
     #[test]
-    fn test_insert_2() {
+    fn test_hardcoded_2_insert() {
         let operations = vec![
             Op::Insert(15, 0),
             Op::Insert(16, 0),
@@ -593,7 +683,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_3() {
+    fn test_hardcoded_3_insert() {
         let operations = vec![
             Op::Insert(0, 0),
             Op::Insert(1, 0),
@@ -607,7 +697,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_duplicate_1() {
+    fn test_hardcoded_4_insert() {
         let operations = vec![
             Op::Insert(1551649896, 0),
             Op::Insert(1551649897, 0),
@@ -618,13 +708,13 @@ mod test {
     }
 
     #[test]
-    fn test_insert_delete_1() {
+    fn test_hardcoded_5_insert_delete() {
         let operations = vec![Op::Insert(0, 0), Op::Insert(1, 0), Op::Delete(1)];
         run_operations(operations);
     }
 
     #[test]
-    fn test_insert_delete_get_1() {
+    fn test_hardcoded_6_insert_delete_get() {
         let operations = vec![
             Op::Insert(1, 10),
             Op::Insert(2, 20),
@@ -638,7 +728,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_delete_2() {
+    fn test_hardcoded_7_insert_delete() {
         let operations = vec![
             Op::Insert(0, 0),
             Op::Insert(1, 0),
@@ -659,7 +749,7 @@ mod test {
     }
 
     #[test]
-    fn test_insert_delete_get_2() {
+    fn test_hardcoded_8_insert_delete_get() {
         let operations = vec![
             Op::Insert(100, 1000),
             Op::Insert(200, 2000),
@@ -681,7 +771,7 @@ mod test {
     }
 
     #[test]
-    fn test_minimal_failing_input() {
+    fn test_hardcoded_9_insert_delete() {
         let operations = vec![
             Op::Insert(887, 0),
             Op::Insert(0, 0),
@@ -694,7 +784,7 @@ mod test {
     }
 
     #[test]
-    fn test_minimal_failing_input_2() {
+    fn test_hardcoded_10_insert_delete() {
         let operations = vec![
             Op::Insert(0, 0),
             Op::Insert(0, 0),
@@ -709,7 +799,7 @@ mod test {
     }
 
     #[test]
-    fn test_minimal_failing_input_3() {
+    fn test_hardcoded_11_insert_delete() {
         let operations = vec![
             Op::Insert(0, 0),
             Op::Insert(1, 0),
@@ -730,7 +820,7 @@ mod test {
     }
 
     #[test]
-    fn test_minimal_failing_input_4() {
+    fn test_hardcoded_12_insert_delete() {
         let operations = vec![
             Op::Insert(0, 0),
             Op::Insert(0, 0),
@@ -756,6 +846,33 @@ mod test {
         run_operations(operations);
     }
 
+    #[test]
+    fn test_hardcoded_13_first_last_key_value() {
+        let operations = vec![
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+            Op::Insert(100, 1),
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+            Op::Insert(50, 2),
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+            Op::Insert(150, 3),
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+            Op::Delete(50),
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+            Op::Delete(150),
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+            Op::Delete(100),
+            Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+        ];
+        run_operations(operations);
+    }
+
     proptest! {
         #[test]
         fn test_merkle_btree_txn_against_btreemap(operations in proptest::collection::vec(
@@ -763,6 +880,8 @@ mod test {
                 (0..1000u32, 0..10u32).prop_map(|(k, v)| Op::Insert(k, v)),
                 (0..1000u32).prop_map(Op::Get),
                 (0..1000u32).prop_map(Op::Delete),
+                Just(Op::GetFirstKeyValue),
+                Just(Op::GetLastKeyValue),
             ],
             1..10_000
         )) {

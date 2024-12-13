@@ -6,7 +6,7 @@ use imbl::Vector;
 use kairos_trie::{PortableHash, PortableHasher};
 
 use crate::{
-    node::{NodeHash, NodeOrLeaf},
+    node::{NodeHash, NodeOrLeaf, NodeOrLeafOwned, NodeOrLeafRef},
     store::{Idx, Store},
 };
 
@@ -18,7 +18,7 @@ pub struct SnapshotBuilder<K: Ord + Clone + PortableHash, V: Clone + PortableHas
 #[derive(Clone)]
 pub struct SnapshotBuilderInner<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> {
     pub db: Db,
-    nodes: Vector<(NodeHash, Option<NodeOrLeaf<K, V>>)>,
+    nodes: Vector<(NodeHash, Option<NodeOrLeafOwned<K, V>>)>,
 }
 
 impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder<K, V, Db> {
@@ -65,12 +65,22 @@ impl<K: Ord + Clone + PortableHash + Debug, V: Clone + PortableHash + Debug, Db>
         Ok(*node_hash)
     }
 
-    fn get(&self, hash_idx: Idx) -> Result<NodeOrLeaf<Self::Key, Self::Value>, Self::Error> {
+    fn get(&self, hash_idx: Idx) -> Result<NodeOrLeafRef<'_, Self::Key, Self::Value>, Self::Error> {
         let inner = self.inner.borrow();
         let (_, node_opt) = inner
             .nodes
             .get(hash_idx as usize)
             .ok_or("Index out of bounds")?;
-        node_opt.clone().ok_or("Node not found".into())
+
+        let node_or_leaf = node_opt.as_ref().ok_or("Node not found")?;
+        // Safety: This is safe because the SnapshotBuilder is garanteed to outlive 'l the lifetime
+        // The SnapshotBuilder hold one copy of each Arc<Node> and Arc<Leaf> in the nodes Vector until it is dropped.
+        // Hence, the reference to the Arc<Node> or Arc<Leaf> is valid for the lifetime of the SnapshotBuilder.
+        unsafe {
+            match node_or_leaf {
+                NodeOrLeaf::Node(node) => Ok(NodeOrLeafRef::Node(&*(node as *const _))),
+                NodeOrLeaf::Leaf(leaf) => Ok(NodeOrLeafRef::Leaf(&*(leaf as *const _))),
+            }
+        }
     }
 }

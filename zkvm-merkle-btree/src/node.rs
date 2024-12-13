@@ -1,5 +1,4 @@
-use core::panic;
-use std::iter;
+use core::iter;
 
 use alloc::sync::Arc;
 
@@ -8,7 +7,7 @@ use arrayvec::ArrayVec;
 use crate::store::Idx;
 
 /// TODO make it configurable
-const BTREE_ORDER: usize = 2;
+const BTREE_ORDER: usize = 10;
 pub const EMPTY_TREE_ROOT_HASH: [u8; 32] = [0; 32];
 
 pub type NodeHash = [u8; 32];
@@ -275,21 +274,24 @@ pub struct Leaf<K, V> {
     pub value: V,
 }
 
-#[derive(Debug, Clone)]
-pub enum NodeOrLeaf<K, V> {
-    Node(Arc<Node<K, V>>),
-    Leaf(Arc<Leaf<K, V>>),
+#[derive(Debug, Clone, Copy)]
+pub enum NodeOrLeaf<N, L> {
+    Node(N),
+    Leaf(L),
 }
 
-impl<K, V> NodeOrLeaf<K, V> {
-    pub fn node(&self) -> Option<&Arc<Node<K, V>>> {
+pub type NodeOrLeafRef<'a, K, V> = NodeOrLeaf<&'a Arc<Node<K, V>>, &'a Arc<Leaf<K, V>>>;
+pub type NodeOrLeafOwned<K, V> = NodeOrLeaf<Arc<Node<K, V>>, Arc<Leaf<K, V>>>;
+
+impl<N, L> NodeOrLeaf<N, L> {
+    pub fn node(&self) -> Option<&N> {
         match self {
             NodeOrLeaf::Node(node) => Some(node),
             _ => None,
         }
     }
 
-    pub fn leaf(&self) -> Option<&Arc<Leaf<K, V>>> {
+    pub fn leaf(&self) -> Option<&L> {
         match self {
             NodeOrLeaf::Leaf(leaf) => Some(leaf),
             _ => None,
@@ -297,37 +299,12 @@ impl<K, V> NodeOrLeaf<K, V> {
     }
 }
 
-impl<K, V> TryFrom<NodeOrLeaf<K, V>> for Arc<Node<K, V>> {
-    type Error = ();
-
-    fn try_from(node_or_leaf: NodeOrLeaf<K, V>) -> Result<Self, Self::Error> {
-        match node_or_leaf {
-            NodeOrLeaf::Node(node) => Ok(node),
-            NodeOrLeaf::Leaf(_) => Err(()),
+impl<K, V> NodeOrLeafOwned<K, V> {
+    pub fn as_ref(&self) -> NodeOrLeaf<&Arc<Node<K, V>>, &Arc<Leaf<K, V>>> {
+        match self {
+            NodeOrLeaf::Node(node) => NodeOrLeaf::Node(node),
+            NodeOrLeaf::Leaf(leaf) => NodeOrLeaf::Leaf(leaf),
         }
-    }
-}
-
-impl<K, V> TryFrom<NodeOrLeaf<K, V>> for Arc<Leaf<K, V>> {
-    type Error = ();
-
-    fn try_from(node_or_leaf: NodeOrLeaf<K, V>) -> Result<Self, Self::Error> {
-        match node_or_leaf {
-            NodeOrLeaf::Node(_) => Err(()),
-            NodeOrLeaf::Leaf(leaf) => Ok(leaf),
-        }
-    }
-}
-
-impl<K, V> From<Arc<Leaf<K, V>>> for NodeOrLeaf<K, V> {
-    fn from(leaf: Arc<Leaf<K, V>>) -> Self {
-        NodeOrLeaf::Leaf(leaf)
-    }
-}
-
-impl<K, V> From<Arc<Node<K, V>>> for NodeOrLeaf<K, V> {
-    fn from(node: Arc<Node<K, V>>) -> Self {
-        NodeOrLeaf::Node(node)
     }
 }
 
@@ -382,11 +359,20 @@ impl<K, V> From<Arc<Leaf<K, V>>> for NodeRef<K, V> {
     }
 }
 
-impl<K, V> From<NodeOrLeaf<K, V>> for NodeRef<K, V> {
-    fn from(node_or_leaf: NodeOrLeaf<K, V>) -> Self {
+impl<K, V> From<NodeOrLeafOwned<K, V>> for NodeRef<K, V> {
+    fn from(node_or_leaf: NodeOrLeafOwned<K, V>) -> Self {
         match node_or_leaf {
             NodeOrLeaf::Node(node) => NodeRef::Node(node),
             NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(leaf),
+        }
+    }
+}
+
+impl<K, V> From<NodeOrLeafRef<'_, K, V>> for NodeRef<K, V> {
+    fn from(node_or_leaf: NodeOrLeafRef<'_, K, V>) -> Self {
+        match node_or_leaf {
+            NodeOrLeaf::Node(node) => NodeRef::Node(node.clone()),
+            NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(leaf.clone()),
         }
     }
 }

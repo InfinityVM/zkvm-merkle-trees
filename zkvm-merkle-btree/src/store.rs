@@ -2,7 +2,7 @@ use core::fmt::{Debug, Display};
 
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::node::{NodeHash, NodeOrLeaf};
+use crate::node::{NodeHash, NodeOrLeafRef};
 
 pub type Idx = u32;
 
@@ -17,5 +17,5 @@ pub trait Store {
         hash_idx: Idx,
     ) -> Result<NodeHash, Self::Error>;
 
-    fn get(&self, hash_idx: Idx) -> Result<NodeOrLeaf<Self::Key, Self::Value>, Self::Error>;
+    fn get(&self, hash_idx: Idx) -> Result<NodeOrLeafRef<'_, Self::Key, Self::Value>, Self::Error>;
 }
