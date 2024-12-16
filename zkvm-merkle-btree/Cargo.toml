@@ -3,12 +3,22 @@ name = "zkvm-merkle-btree"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["std"]
+std = []
+serde = ["dep:serde"]
+
 [dependencies]
 kairos-trie = { path = "../kairos-trie" }
 
 arrayvec = "0.7"
 imbl = "3.0.0"
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "alloc",
+], optional = true }
 
 [dev-dependencies]
 proptest-derive = { version = "0.5" }
 proptest = { version = "1" }
+sha2 = "0.10"

@@ -4,8 +4,10 @@ use core::{cmp::Ordering, mem};
 use std::cmp;
 
 use arrayvec::ArrayVec;
-use kairos_trie::PortableHash;
+use kairos_trie::{PortableHash, PortableHasher};
 
+use crate::db::DatabaseSet;
+use crate::node::{NodeRep, BTREE_ORDER};
 use crate::{
     node::{Leaf, Node, NodeHash, NodeOrLeaf, NodeRef, EMPTY_TREE_ROOT_HASH},
     snapshot::SnapshotBuilder,
@@ -38,7 +40,141 @@ impl<K: Ord + Clone + PortableHash + Debug, V: Clone + PortableHash + Debug, Db>
     }
 }
 
+impl<
+        K: Clone + Debug + PortableHash + Ord,
+        V: Clone + Debug + PortableHash,
+        Db: DatabaseSet<K, V>,
+    > MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
+{
+    /// Write modified nodes to the database and return the root hash.
+    /// Calling this method will write all modified nodes to the database.
+    /// Calling this method again will rewrite the nodes to the database.
+    ///
+    /// Caching writes is the responsibility of the `DatabaseSet` implementation.
+    ///
+    /// Caller must ensure that the hasher is reset before calling this method.
+    #[inline]
+    pub fn commit(&self, hasher: &mut impl PortableHasher<32>) -> Result<NodeHash, String> where {
+        let on_modified_leaf = &mut |hash: &NodeHash, leaf: &Leaf<K, V>| {
+            self.data_store
+                .db
+                .set(hash, NodeOrLeaf::Leaf(leaf.clone()))
+                .map_err(|e| e.to_string())
+        };
+
+        let on_modified_branch =
+            &mut |hash: &NodeHash,
+                  node: &Node<K, V>,
+                  child_hashes: &ArrayVec<_, { BTREE_ORDER * 2 }>| {
+                let node = NodeOrLeaf::Node(NodeRep {
+                    keys: node.keys.clone(),
+                    children: ArrayVec::from_iter(child_hashes.iter().cloned()),
+                });
+
+                self.data_store
+                    .db
+                    .set(hash, node)
+                    .map_err(|e| e.to_string())
+            };
+
+        self.calc_root_hash_inner(hasher, on_modified_leaf, on_modified_branch)
+    }
+}
+
 impl<S: Store> MerkleBTreeTxn<S> {
+    /// Calculate the root hash of the trie.
+    ///
+    /// Caller must ensure that the hasher is reset before calling this method.
+    #[inline]
+    pub fn calc_root_hash(
+        &self,
+        hasher: &mut impl PortableHasher<32>,
+    ) -> Result<NodeHash, S::Error> {
+        self.calc_root_hash_inner(hasher, &mut |_, _| Ok(()), &mut |_, _, _| Ok(()))
+    }
+
+    fn calc_root_hash_inner(
+        &self,
+        hasher: &mut impl PortableHasher<32>,
+        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<S::Key, S::Value>) -> Result<(), S::Error>,
+        on_modified_branch: &mut impl FnMut(
+            &NodeHash,
+            &Node<S::Key, S::Value>,
+            &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
+        ) -> Result<(), S::Error>,
+    ) -> Result<NodeHash, S::Error> {
+        match &self.current_root {
+            node_ref @ NodeRef::Node(_) => Self::calc_root_hash_node(
+                hasher,
+                &self.data_store,
+                node_ref,
+                on_modified_leaf,
+                on_modified_branch,
+            ),
+            NodeRef::Leaf(leaf) => {
+                leaf.portable_hash(hasher);
+                Ok(hasher.finalize_reset())
+            }
+            NodeRef::Stored(hash_idx) => self.data_store.calc_subtree_hash(hasher, *hash_idx),
+            NodeRef::Null => Ok(EMPTY_TREE_ROOT_HASH),
+        }
+    }
+
+    #[inline]
+    fn calc_root_hash_node(
+        hasher: &mut impl PortableHasher<32>,
+        data_store: &S,
+        node_ref: &NodeRef<S::Key, S::Value>,
+        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<S::Key, S::Value>) -> Result<(), S::Error>,
+        on_modified_branch: &mut impl FnMut(
+            &NodeHash,
+            &Node<S::Key, S::Value>,
+            &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
+        ) -> Result<(), S::Error>,
+    ) -> Result<NodeHash, S::Error> {
+        match node_ref {
+            NodeRef::Node(node) => {
+                const MAX_CHILDREN: usize = BTREE_ORDER * 2;
+                debug_assert!(MAX_CHILDREN == Node::<S::Key, S::Value>::max_children());
+
+                // TODO: this a lot of stack space, consider using a heap allocated stack.
+                // The direct recursion is less of an issue than with the trie because the tree is much shallower.
+                // But the stack usage is much higher per node.
+                let mut child_hashes = ArrayVec::<NodeHash, MAX_CHILDREN>::new();
+
+                for child in &node.children {
+                    let child_hash = Self::calc_root_hash_node(
+                        hasher,
+                        data_store,
+                        child,
+                        on_modified_leaf,
+                        on_modified_branch,
+                    )?;
+                    child_hashes.push(child_hash);
+                }
+
+                node.portable_hash_iter(hasher, child_hashes.iter());
+                let hash = hasher.finalize_reset();
+
+                on_modified_branch(&hash, node, &child_hashes)?;
+
+                Ok(hasher.finalize_reset())
+            }
+            NodeRef::Leaf(leaf) => {
+                leaf.portable_hash(hasher);
+                let hash = hasher.finalize_reset();
+
+                on_modified_leaf(&hash, leaf)?;
+
+                Ok(hash)
+            }
+            NodeRef::Stored(hash_idx) => data_store.calc_subtree_hash(hasher, *hash_idx),
+            NodeRef::Null => {
+                unreachable!("Null nodes should never appear in the tree except as the root")
+            }
+        }
+    }
+
     pub fn get(&self, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
         let mut node_ref = &self.current_root;
 

@@ -1049,4 +1049,6 @@ dependencies = [
  "kairos-trie",
  "proptest",
  "proptest-derive",
+ "serde",
+ "sha2",
 ]

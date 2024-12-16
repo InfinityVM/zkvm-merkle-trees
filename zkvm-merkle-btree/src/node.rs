@@ -3,11 +3,12 @@ use core::iter;
 use alloc::sync::Arc;
 
 use arrayvec::ArrayVec;
+use kairos_trie::{PortableHash, PortableUpdate};
 
 use crate::store::Idx;
 
 /// TODO make it configurable
-const BTREE_ORDER: usize = 10;
+pub const BTREE_ORDER: usize = 10;
 pub const EMPTY_TREE_ROOT_HASH: [u8; 32] = [0; 32];
 
 pub type NodeHash = [u8; 32];
@@ -26,11 +27,14 @@ pub type NodeHash = [u8; 32];
 /// The keys are sorted in ascending order.
 /// The keys partition the children greater or equal to the key go right.
 #[derive(Debug, Clone)]
-pub struct Node<K, V> {
+pub struct NodeRep<K, NR> {
     // TODO consider using a sparse array to avoid needless copying
     pub keys: ArrayVec<K, { BTREE_ORDER * 2 - 1 }>,
-    pub children: ArrayVec<NodeRef<K, V>, { BTREE_ORDER * 2 }>,
+    pub children: ArrayVec<NR, { BTREE_ORDER * 2 }>,
 }
+
+pub type Node<K, V> = NodeRep<K, NodeRef<K, V>>;
+pub type NodeSnapshot<K> = NodeRep<K, Idx>;
 
 impl<K: Ord + Clone, V: Clone> Node<K, V> {
     pub fn is_full(&self) -> bool {
@@ -268,10 +272,43 @@ impl<K: Ord + Clone, V: Clone> Node<K, V> {
     }
 }
 
-#[derive(Debug, Clone)]
+impl<K> PortableHash for NodeRep<K, NodeHash>
+where
+    K: PortableHash,
+{
+    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
+        // TODO: Add size to hash
+        self.keys.iter().for_each(|key| key.portable_hash(hasher));
+        self.children
+            .iter()
+            .for_each(|child_hash| child_hash.portable_hash(hasher));
+    }
+}
+
+impl<K: PortableHash, NR> NodeRep<K, NR> {
+    pub fn portable_hash_iter<'l>(
+        &self,
+        hasher: &mut impl PortableUpdate,
+        child_hashes: impl Iterator<Item = &'l NodeHash>,
+    ) {
+        // TODO: Add size to hash
+        self.keys.iter().for_each(|key| key.portable_hash(hasher));
+        child_hashes.for_each(|child_hash| child_hash.portable_hash(hasher));
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Leaf<K, V> {
     pub key: K,
     pub value: V,
+}
+
+impl<K: PortableHash, V: PortableHash> PortableHash for Leaf<K, V> {
+    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
+        self.key.portable_hash(hasher);
+        self.value.portable_hash(hasher);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -282,6 +319,7 @@ pub enum NodeOrLeaf<N, L> {
 
 pub type NodeOrLeafRef<'a, K, V> = NodeOrLeaf<&'a Arc<Node<K, V>>, &'a Arc<Leaf<K, V>>>;
 pub type NodeOrLeafOwned<K, V> = NodeOrLeaf<Arc<Node<K, V>>, Arc<Leaf<K, V>>>;
+pub type NodeOrLeafDb<K, V> = NodeOrLeaf<NodeRep<K, NodeHash>, Leaf<K, V>>;
 
 impl<N, L> NodeOrLeaf<N, L> {
     pub fn node(&self) -> Option<&N> {
@@ -373,6 +411,35 @@ impl<K, V> From<NodeOrLeafRef<'_, K, V>> for NodeRef<K, V> {
         match node_or_leaf {
             NodeOrLeaf::Node(node) => NodeRef::Node(node.clone()),
             NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(leaf.clone()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use kairos_trie::{DigestHasher, PortableHasher};
+    use proptest::prelude::*;
+    use sha2::Sha256;
+
+    proptest! {
+        #[test]
+        fn test_portable_hash_matches(
+            keys in proptest::collection::vec(0u32..100, 1..10),
+            child_hashes in proptest::collection::vec(any::<[u8; 32]>(), 2..11)
+        ) {
+            let node_with_hashes = NodeRep {
+                keys: ArrayVec::from_iter(keys.clone()),
+                children: ArrayVec::from_iter(child_hashes.clone()),
+            };
+
+            let hasher1 = &mut DigestHasher::<Sha256>::default();
+            let hasher2 = &mut DigestHasher::<Sha256>::default();
+
+            node_with_hashes.portable_hash(hasher1);
+            node_with_hashes.portable_hash_iter(hasher2, child_hashes.iter());
+
+            assert_eq!(hasher1.finalize_reset(), hasher2.finalize_reset());
         }
     }
 }
