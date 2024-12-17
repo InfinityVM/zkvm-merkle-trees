@@ -8,7 +8,7 @@ use kairos_trie::{PortableHash, PortableUpdate};
 use crate::store::Idx;
 
 /// TODO make it configurable
-pub const BTREE_ORDER: usize = 10;
+pub const BTREE_ORDER: usize = 3;
 pub const EMPTY_TREE_ROOT_HASH: [u8; 32] = [0; 32];
 
 pub type NodeHash = [u8; 32];
@@ -26,7 +26,7 @@ pub type NodeHash = [u8; 32];
 ///
 /// The keys are sorted in ascending order.
 /// The keys partition the children greater or equal to the key go right.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeRep<K, NR> {
     // TODO consider using a sparse array to avoid needless copying
     pub keys: ArrayVec<K, { BTREE_ORDER * 2 - 1 }>,
@@ -139,9 +139,8 @@ impl<K: Ord + Clone, V: Clone> Node<K, V> {
                 Ok(())
             }
 
-            // FIXME
-            // (NodeRef::Leaf())
-            (NodeRef::Stored(_), _, NodeRef::Stored(_)) => Err(()),
+            (NodeRef::Stored(_) | NodeRef::Null, _, NodeRef::Stored(_))
+            | (NodeRef::Stored(_), _, NodeRef::Null) => Err(()),
 
             _ => {
                 unreachable!("merge_or_balance called on node with one child");
@@ -311,7 +310,7 @@ impl<K: PortableHash, V: PortableHash> PortableHash for Leaf<K, V> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NodeOrLeaf<N, L> {
     Node(N),
     Leaf(L),
@@ -320,6 +319,8 @@ pub enum NodeOrLeaf<N, L> {
 pub type NodeOrLeafRef<'a, K, V> = NodeOrLeaf<&'a Arc<Node<K, V>>, &'a Arc<Leaf<K, V>>>;
 pub type NodeOrLeafOwned<K, V> = NodeOrLeaf<Arc<Node<K, V>>, Arc<Leaf<K, V>>>;
 pub type NodeOrLeafDb<K, V> = NodeOrLeaf<NodeRep<K, NodeHash>, Leaf<K, V>>;
+pub type NodeOrLeafSnapshotRef<'a, K, V> = NodeOrLeaf<&'a NodeSnapshot<K>, &'a Leaf<K, V>>;
+pub type NodeOrLeafSnapshotArc<K, V> = NodeOrLeaf<Arc<NodeSnapshot<K>>, Arc<Leaf<K, V>>>;
 
 impl<N, L> NodeOrLeaf<N, L> {
     pub fn node(&self) -> Option<&N> {
@@ -385,6 +386,22 @@ impl<K, V> NodeRef<K, V> {
     }
 }
 
+impl<K: Clone, V: Clone> From<NodeOrLeafSnapshotRef<'_, K, V>> for NodeRef<K, V> {
+    fn from(node_or_leaf: NodeOrLeafSnapshotRef<K, V>) -> Self {
+        match node_or_leaf {
+            NodeOrLeaf::Node(node) => NodeRef::Node(Arc::new(NodeRep {
+                keys: node.keys.clone(),
+                children: node
+                    .children
+                    .iter()
+                    .map(|idx| NodeRef::Stored(*idx))
+                    .collect(),
+            })),
+            NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(Arc::new(leaf.clone())),
+        }
+    }
+}
+
 impl<K, V> From<Arc<Node<K, V>>> for NodeRef<K, V> {
     fn from(node: Arc<Node<K, V>>) -> Self {
         NodeRef::Node(node)
@@ -425,8 +442,10 @@ mod test {
     proptest! {
         #[test]
         fn test_portable_hash_matches(
-            keys in proptest::collection::vec(0u32..100, 1..10),
-            child_hashes in proptest::collection::vec(any::<[u8; 32]>(), 2..11)
+            // This test does not ensure the Node is valid
+            // the number of children and keys may not match
+            keys in proptest::collection::vec(0u32..100, 1..(BTREE_ORDER * 2 - 1)),
+            child_hashes in proptest::collection::vec(any::<[u8; 32]>(), 2..(BTREE_ORDER * 2)),
         ) {
             let node_with_hashes = NodeRep {
                 keys: ArrayVec::from_iter(keys.clone()),

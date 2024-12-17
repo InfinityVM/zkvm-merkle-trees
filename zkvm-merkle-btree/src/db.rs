@@ -1,4 +1,5 @@
 use core::fmt::Display;
+use std::{cell::RefCell, collections::BTreeMap};
 
 use alloc::{rc::Rc, sync::Arc};
 
@@ -67,5 +68,33 @@ impl<K, V, D: DatabaseSet<K, V>> DatabaseSet<K, V> for Arc<D> {
     #[inline]
     fn set(&self, hash: &NodeHash, node: NodeOrLeafDb<K, V>) -> Result<(), Self::SetError> {
         (**self).set(hash, node)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct MemoryDb<K, V> {
+    leaves: RefCell<BTreeMap<NodeHash, NodeOrLeafDb<K, V>>>,
+}
+
+impl<K: Clone, V: Clone> DatabaseGet<K, V> for MemoryDb<K, V> {
+    type GetError = String;
+
+    #[inline]
+    fn get(&self, hash: &NodeHash) -> Result<NodeOrLeafDb<K, V>, Self::GetError> {
+        self.leaves
+            .borrow()
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| format!("Hash: `{:?}` not found", hash))
+    }
+}
+
+impl<K: Clone, V: Clone> DatabaseSet<K, V> for MemoryDb<K, V> {
+    type SetError = String;
+
+    #[inline]
+    fn set(&self, hash: &NodeHash, node: NodeOrLeafDb<K, V>) -> Result<(), Self::SetError> {
+        self.leaves.borrow_mut().insert(*hash, node);
+        Ok(())
     }
 }

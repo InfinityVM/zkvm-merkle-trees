@@ -2,10 +2,7 @@
 
 resolver = "2"
 
-members = [
-    "kairos-trie",
-    "zkvm-merkle-btree"
-]
+members = ["kairos-trie", "zkvm-merkle-btree"]
 
 
 [profile.test]

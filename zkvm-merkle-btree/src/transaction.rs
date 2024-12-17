@@ -6,8 +6,9 @@ use std::cmp;
 use arrayvec::ArrayVec;
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::db::DatabaseSet;
+use crate::db::{DatabaseGet, DatabaseSet};
 use crate::node::{NodeRep, BTREE_ORDER};
+use crate::snapshot::{Snapshot, VerifiedSnapshot};
 use crate::{
     node::{Leaf, Node, NodeHash, NodeOrLeaf, NodeRef, EMPTY_TREE_ROOT_HASH},
     snapshot::SnapshotBuilder,
@@ -20,8 +21,11 @@ pub struct MerkleBTreeTxn<S: Store> {
     current_root: NodeRef<S::Key, S::Value>,
 }
 
-impl<K: Ord + Clone + PortableHash + Debug, V: Clone + PortableHash + Debug, Db>
-    MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
+impl<
+        K: Ord + Clone + PortableHash + Debug,
+        V: Clone + PortableHash + Debug,
+        Db: DatabaseGet<K, V>,
+    > MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
 {
     pub fn new_snapshot_builder_txn(root: NodeHash, db: Db) -> Self {
         debug_assert!(EMPTY_TREE_ROOT_HASH == NodeHash::default());
@@ -36,6 +40,35 @@ impl<K: Ord + Clone + PortableHash + Debug, V: Clone + PortableHash + Debug, Db>
                 data_store: SnapshotBuilder::new(root, db),
                 current_root: NodeRef::Stored(0),
             }
+        }
+    }
+
+    pub fn from_snapshot_builder_txn(snapshot_builder: SnapshotBuilder<K, V, Db>) -> Self {
+        Self {
+            data_store: snapshot_builder,
+            current_root: NodeRef::Stored(0),
+        }
+    }
+
+    /// Builds a snapshot of the tree before the transaction.
+    /// The `Snapshot` is not a complete representation of the tree.
+    /// The `Snapshot` only contains information about the parts of the tree touched by the transaction.
+    /// Because of this, two `Snapshot`s of the same tree may not be equal if the transactions differ.
+    ///
+    /// Note: All operations including get affect the contents of the snapshot.
+    #[inline]
+    pub fn build_initial_snapshot(&self) -> Snapshot<K, V> {
+        self.data_store.build_initial_snapshot()
+    }
+}
+
+impl<'s, S: Store + AsRef<Snapshot<S::Key, S::Value>>> MerkleBTreeTxn<&'s VerifiedSnapshot<S>> {
+    /// Create a `Transaction` from a borrowed `VerifiedSnapshot`.
+    #[inline]
+    pub fn from_verified_snapshot_ref(snapshot: &'s VerifiedSnapshot<S>) -> Self {
+        MerkleBTreeTxn {
+            current_root: snapshot.root_node_ref(),
+            data_store: snapshot,
         }
     }
 }
@@ -104,19 +137,14 @@ impl<S: Store> MerkleBTreeTxn<S> {
         ) -> Result<(), S::Error>,
     ) -> Result<NodeHash, S::Error> {
         match &self.current_root {
-            node_ref @ NodeRef::Node(_) => Self::calc_root_hash_node(
+            NodeRef::Null => Ok(EMPTY_TREE_ROOT_HASH),
+            node_ref => Self::calc_root_hash_node(
                 hasher,
                 &self.data_store,
                 node_ref,
                 on_modified_leaf,
                 on_modified_branch,
             ),
-            NodeRef::Leaf(leaf) => {
-                leaf.portable_hash(hasher);
-                Ok(hasher.finalize_reset())
-            }
-            NodeRef::Stored(hash_idx) => self.data_store.calc_subtree_hash(hasher, *hash_idx),
-            NodeRef::Null => Ok(EMPTY_TREE_ROOT_HASH),
         }
     }
 
@@ -158,7 +186,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
 
                 on_modified_branch(&hash, node, &child_hashes)?;
 
-                Ok(hasher.finalize_reset())
+                Ok(hash)
             }
             NodeRef::Leaf(leaf) => {
                 leaf.portable_hash(hasher);
@@ -192,7 +220,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     }
                 }
                 NodeRef::Stored(idx) => {
-                    self.get_stored(*idx, key)?;
+                    return self.get_stored(*idx, key);
                 }
                 NodeRef::Null => return Ok(None),
             }
@@ -206,27 +234,10 @@ impl<S: Store> MerkleBTreeTxn<S> {
 
             match node {
                 NodeOrLeaf::Node(node) => {
-                    let next_node_ref = match node.keys.binary_search(key) {
-                        Ok(equal_key_idx) => &node.children[equal_key_idx + 1],
-                        Err(idx) => &node.children[idx],
+                    stored_idx = match node.keys.binary_search(key) {
+                        Ok(equal_key_idx) => node.children[equal_key_idx + 1],
+                        Err(idx) => node.children[idx],
                     };
-
-                    match next_node_ref {
-                        NodeRef::Node(_) => {
-                            unreachable!("A stored node cannot have a modified child")
-                        }
-                        NodeRef::Leaf(leaf) => {
-                            if &leaf.key == key {
-                                return Ok(Some(leaf.value.clone()));
-                            } else {
-                                return Ok(None);
-                            }
-                        }
-                        NodeRef::Stored(next_stored) => {
-                            stored_idx = *next_stored;
-                        }
-                        NodeRef::Null => return Ok(None),
-                    }
                 }
                 NodeOrLeaf::Leaf(leaf) => {
                     if &leaf.key == key {
@@ -538,17 +549,14 @@ impl<S: Store> MerkleBTreeTxn<S> {
                 if let Err(()) = node.merge_or_balance(idx) {
                     if idx == 0 {
                         let hash_idx = node.children[1].stored().unwrap();
-                        node.children[1] = NodeRef::Node(
-                            (*data_store.get(hash_idx)?.node().expect("unbalanced node")).clone(),
-                        );
+                        node.children[1] = NodeRef::from(data_store.get(hash_idx)?);
                     } else {
                         let hash_idx = node.children[idx - 1].stored().unwrap();
-                        node.children[idx - 1] = NodeRef::Node(
-                            (*data_store.get(hash_idx)?.node().expect("unbalanced node")).clone(),
-                        );
-                        // We just added a sibling node to the tree
-                        node.merge_or_balance(idx).unwrap()
+                        node.children[idx - 1] = NodeRef::from(data_store.get(hash_idx)?);
                     }
+
+                    // We just added a sibling node to the tree
+                    node.merge_or_balance(idx).unwrap()
                 };
 
                 if node.is_to_small() {
@@ -583,15 +591,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
         let mut node = match &self.current_root {
             NodeRef::Node(node) => node,
             NodeRef::Leaf(leaf) => return Ok(Some((&leaf.key, &leaf.value))),
-            NodeRef::Stored(idx) => {
-                let node_or_leaf = self.data_store.get(*idx)?;
-                match node_or_leaf {
-                    NodeOrLeaf::Node(stored_node) => stored_node,
-                    NodeOrLeaf::Leaf(leaf) => {
-                        return Ok(Some((&leaf.key, &leaf.value)));
-                    }
-                }
-            }
+            NodeRef::Stored(idx) => return self.first_key_value_stored(*idx),
             NodeRef::Null => return Ok(None),
         };
 
@@ -603,17 +603,26 @@ impl<S: Store> MerkleBTreeTxn<S> {
                 NodeRef::Leaf(leaf) => {
                     return Ok(Some((&leaf.key, &leaf.value)));
                 }
-                NodeRef::Stored(idx) => {
-                    let node_or_leaf = self.data_store.get(*idx)?;
-                    match node_or_leaf {
-                        NodeOrLeaf::Node(stored_node) => node = stored_node,
-                        NodeOrLeaf::Leaf(leaf) => {
-                            return Ok(Some((&leaf.key, &leaf.value)));
-                        }
-                    }
-                }
+                NodeRef::Stored(idx) => return self.first_key_value_stored(*idx),
                 NodeRef::Null => {
                     return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn first_key_value_stored(
+        &self,
+        mut stored_idx: Idx,
+    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        loop {
+            let node_or_leaf = self.data_store.get(stored_idx)?;
+            match node_or_leaf {
+                NodeOrLeaf::Node(node) => {
+                    stored_idx = node.children[0];
+                }
+                NodeOrLeaf::Leaf(leaf) => {
+                    return Ok(Some((&leaf.key, &leaf.value)));
                 }
             }
         }
@@ -623,15 +632,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
         let mut node = match &self.current_root {
             NodeRef::Node(node) => node,
             NodeRef::Leaf(leaf) => return Ok(Some((&leaf.key, &leaf.value))),
-            NodeRef::Stored(idx) => {
-                let node_or_leaf = self.data_store.get(*idx)?;
-                match node_or_leaf {
-                    NodeOrLeaf::Node(stored_node) => stored_node,
-                    NodeOrLeaf::Leaf(leaf) => {
-                        return Ok(Some((&leaf.key, &leaf.value)));
-                    }
-                }
-            }
+            NodeRef::Stored(idx) => return self.last_key_value_stored(*idx),
             NodeRef::Null => return Ok(None),
         };
 
@@ -643,17 +644,26 @@ impl<S: Store> MerkleBTreeTxn<S> {
                 NodeRef::Leaf(leaf) => {
                     return Ok(Some((&leaf.key, &leaf.value)));
                 }
-                NodeRef::Stored(idx) => {
-                    let node_or_leaf = self.data_store.get(*idx)?;
-                    match node_or_leaf {
-                        NodeOrLeaf::Node(stored_node) => node = stored_node,
-                        NodeOrLeaf::Leaf(leaf) => {
-                            return Ok(Some((&leaf.key, &leaf.value)));
-                        }
-                    }
-                }
+                NodeRef::Stored(idx) => return self.last_key_value_stored(*idx),
                 NodeRef::Null => {
                     return Ok(None);
+                }
+            }
+        }
+    }
+
+    fn last_key_value_stored(
+        &self,
+        mut stored_idx: Idx,
+    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        loop {
+            let node_or_leaf = self.data_store.get(stored_idx)?;
+            match node_or_leaf {
+                NodeOrLeaf::Node(node) => {
+                    stored_idx = *node.children.last().unwrap();
+                }
+                NodeOrLeaf::Leaf(leaf) => {
+                    return Ok(Some((&leaf.key, &leaf.value)));
                 }
             }
         }
@@ -742,7 +752,7 @@ mod test {
 
     use proptest::prelude::*;
 
-    use crate::transaction::MerkleBTreeTxn;
+    use crate::{db::MemoryDb, transaction::MerkleBTreeTxn};
 
     #[derive(Clone, Debug)]
     enum Op {
@@ -754,7 +764,8 @@ mod test {
     }
 
     fn run_operations(operations: Vec<Op>) {
-        let mut txn_btree = MerkleBTreeTxn::new_snapshot_builder_txn(Default::default(), ());
+        let mut txn_btree =
+            MerkleBTreeTxn::new_snapshot_builder_txn(Default::default(), MemoryDb::default());
         let mut std_btree = BTreeMap::new();
 
         for op in operations {
@@ -1013,9 +1024,9 @@ mod test {
         #[test]
         fn test_merkle_btree_txn_against_btreemap(operations in proptest::collection::vec(
             prop_oneof![
-                (0..1000u32, 0..10u32).prop_map(|(k, v)| Op::Insert(k, v)),
-                (0..1000u32).prop_map(Op::Get),
-                (0..1000u32).prop_map(Op::Delete),
+                (0..10000u32, any::<u32>()).prop_map(|(k, v)| Op::Insert(k, v)),
+                (0..10000u32).prop_map(Op::Get),
+                (0..10000u32).prop_map(Op::Delete),
                 Just(Op::GetFirstKeyValue),
                 Just(Op::GetLastKeyValue),
             ],
