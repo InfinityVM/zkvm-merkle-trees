@@ -8,7 +8,7 @@ use kairos_trie::{PortableHash, PortableUpdate};
 use crate::store::Idx;
 
 /// TODO make it configurable
-pub const BTREE_ORDER: usize = 3;
+pub const BTREE_ORDER: usize = 10;
 pub const EMPTY_TREE_ROOT_HASH: [u8; 32] = [0; 32];
 
 pub type NodeHash = [u8; 32];

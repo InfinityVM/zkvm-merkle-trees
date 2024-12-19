@@ -29,6 +29,7 @@ pub enum Operation {
     EntryInsert(KeyHash, Value),
     EntryAndModifyOrInsert(KeyHash, Value),
     EntryOrInsert(KeyHash, Value),
+    Remove(KeyHash),
 }
 
 prop_compose! {
@@ -41,7 +42,7 @@ prop_compose! {
     pub fn arb_operations(key_count: impl Into<SizeRange>, op_count: impl Into<SizeRange>)
                          (keys in prop::collection::vec(arb_key_hash(), key_count),
                           ops in prop::collection::vec(
-                              (0..5u8,
+                              (0..6u8,
                                any::<prop::sample::Index>(),
                                arb_value()
                               ),
@@ -57,6 +58,7 @@ prop_compose! {
             3 => Operation::EntryInsert(key, value),
             4 => Operation::EntryAndModifyOrInsert(key, value),
             5 => Operation::EntryOrInsert(key, value),
+            6 => Operation::Remove(key),
             _ => unreachable!(),
         }}).collect()
     }
@@ -213,6 +215,10 @@ fn trie_op<S: Store<Value = [u8; 8]>>(
             let old = txn.entry(key).unwrap().get().copied();
             (old, old)
         }
+        Operation::Remove(key) => {
+            let old = txn.remove(key).unwrap();
+            (old, None)
+        }
     }
 }
 
@@ -260,6 +266,10 @@ fn hashmap_op(op: &Operation, map: &mut HashMap<KeyHash, Value>) -> (Option<Valu
         Operation::EntryGet(key) => {
             let old = map.get(key).copied();
             (old, old)
+        }
+        Operation::Remove(key) => {
+            let old = map.remove(key);
+            (old, None)
         }
     }
 }

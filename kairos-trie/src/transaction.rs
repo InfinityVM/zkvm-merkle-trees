@@ -429,6 +429,172 @@ impl<S: Store> Transaction<S> {
             }
         }
     }
+
+    #[inline]
+    pub fn remove(&mut self, key_hash: &KeyHash) -> Result<Option<S::Value>, TrieError> {
+        match &mut self.current_root {
+            TrieRoot::Empty => Ok(None),
+            TrieRoot::Node(node_ref @ NodeRef::ModBranch(_)) => {
+                Self::remove_node(&self.data_store, node_ref, key_hash)
+            }
+            TrieRoot::Node(NodeRef::Stored(stored_idx)) => {
+                let stored_hash = self.data_store.get_node(*stored_idx).map_err(|e| {
+                    format!(
+                        "Error in `remove` at {file}:{line}:{column}: could not get stored node: {e}",
+                        file = file!(),
+                        line = line!(),
+                        column = column!(),
+                    )
+                })?;
+
+                match stored_hash {
+                    Node::Branch(branch) => {
+                        self.current_root = TrieRoot::Node(NodeRef::ModBranch(Box::new(
+                            Branch::from_stored(branch),
+                        )));
+
+                        let TrieRoot::Node(node_ref) = &mut self.current_root else {
+                            unreachable!("We just set the root to a ModBranch");
+                        };
+                        Self::remove_node(&self.data_store, node_ref, key_hash)
+                    }
+                    Node::Leaf(leaf) => {
+                        if leaf.key_hash == *key_hash {
+                            self.current_root = TrieRoot::Empty;
+                            Ok(Some(leaf.value.clone()))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                }
+            }
+            TrieRoot::Node(NodeRef::ModLeaf(leaf)) => {
+                if leaf.key_hash == *key_hash {
+                    let TrieRoot::Node(NodeRef::ModLeaf(leaf)) =
+                        mem::replace(&mut self.current_root, TrieRoot::Empty)
+                    else {
+                        unreachable!("We just matched a ModLeaf");
+                    };
+
+                    Ok(Some(leaf.value))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Remove a leaf from the trie returning the value if it exists.
+    ///
+    /// Caller must ensure that this method is never called with parent_node_ref pointing to a leaf or a stored leaf.
+    #[inline(always)]
+    fn remove_node(
+        data_store: &S,
+        mut parent_node_ref: &mut NodeRef<S::Value>,
+        key_hash: &KeyHash,
+    ) -> Result<Option<S::Value>, TrieError> {
+        loop {
+            let key_position = match parent_node_ref {
+                NodeRef::ModLeaf(_) => unreachable!("A leaf should never be a parent"),
+                NodeRef::Stored(stored_idx) => {
+                    if Self::get_stored_node(data_store, *stored_idx, key_hash)?.is_none() {
+                        return Ok(None);
+                    };
+
+                    let node = data_store.get_node(*stored_idx).map_err(|e| {
+                        format!(
+                            "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
+                            file = file!(),
+                            line = line!(),
+                            column = column!(),
+                        )
+                    })?;
+
+                    match node {
+                        Node::Branch(branch) => {
+                            *parent_node_ref =
+                                NodeRef::ModBranch(Box::new(Branch::from_stored(branch)));
+
+                            continue;
+                        }
+                        Node::Leaf(_) => {
+                            unreachable!("A stored leaf should never be a parent");
+                        }
+                    }
+                }
+                NodeRef::ModBranch(branch) => {
+                    let key_position = branch.key_position(key_hash);
+                    let (matched_child, unmatched_child) = match key_position {
+                        KeyPosition::Left => (&mut branch.left, &mut branch.right),
+                        KeyPosition::Right => (&mut branch.right, &mut branch.left),
+                        KeyPosition::Adjacent(_) => return Ok(None),
+                    };
+
+                    match matched_child {
+                        NodeRef::Stored(stored_idx) => {
+                            if Self::get_stored_node(data_store, *stored_idx, key_hash)?.is_none() {
+                                return Ok(None);
+                            };
+
+                            let node = data_store.get_node(*stored_idx).map_err(|e| {
+                                format!(
+                                    "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
+                                    file = file!(),
+                                    line = line!(),
+                                    column = column!(),
+                                )
+                            })?;
+
+                            match node {
+                                Node::Branch(branch) => {
+                                    *matched_child =
+                                        NodeRef::ModBranch(Box::new(Branch::from_stored(branch)));
+
+                                    key_position
+                                }
+                                Node::Leaf(leaf) => {
+                                    if &leaf.key_hash == key_hash {
+                                        *parent_node_ref = mem::replace(
+                                            unmatched_child,
+                                            NodeRef::temp_null_stored(),
+                                        );
+                                        return Ok(Some(leaf.value.clone()));
+                                    } else {
+                                        return Ok(None);
+                                    }
+                                }
+                            }
+                        }
+                        NodeRef::ModBranch(_) => key_position,
+                        NodeRef::ModLeaf(leaf) => {
+                            if leaf.key_hash == *key_hash {
+                                let leaf = mem::replace(matched_child, NodeRef::temp_null_stored());
+                                let NodeRef::ModLeaf(leaf) = leaf else {
+                                    unreachable!("We just matched a ModLeaf");
+                                };
+
+                                *parent_node_ref =
+                                    mem::replace(unmatched_child, NodeRef::temp_null_stored());
+                                return Ok(Some(leaf.value));
+                            } else {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+            };
+
+            let NodeRef::ModBranch(branch) = parent_node_ref else {
+                unreachable!("We just matched a ModBranch");
+            };
+
+            match key_position {
+                KeyPosition::Left => parent_node_ref = &mut branch.left,
+                KeyPosition::Right => parent_node_ref = &mut branch.right,
+                KeyPosition::Adjacent(_) => return Ok(None),
+            }
+        }
+    }
 }
 
 impl<S: Store> Transaction<S> {
