@@ -403,4 +403,18 @@ proptest! {
         batches in arb_batches(100_000, 1..100_000, 1000, 10_000)) {
         end_to_end_ops(batches);
     }
+
+
+    #[test]
+    fn prop_end_to_end_ops_old_strategy_small_tree(
+        batches in arb_batches(1000, 1..100_000, 1000, 10_000)) {
+        end_to_end_ops(batches);
+    }
+
+
+    #[test]
+    fn prop_end_to_end_ops_old_strategy_tiny_tree(
+        batches in arb_batches(100, 1..100_000, 1000, 10_000)) {
+        end_to_end_ops(batches);
+    }
 }

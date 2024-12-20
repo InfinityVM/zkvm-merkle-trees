@@ -220,17 +220,21 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     }
                 }
                 NodeRef::Stored(idx) => {
-                    return self.get_stored(*idx, key);
+                    return Self::get_stored(&self.data_store, *idx, key);
                 }
                 NodeRef::Null => return Ok(None),
             }
         }
     }
 
-    fn get_stored(&self, mut stored_idx: Idx, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
+    fn get_stored(
+        data_store: &S,
+        mut stored_idx: Idx,
+        key: &S::Key,
+    ) -> Result<Option<S::Value>, S::Error> {
         loop {
             // TODO consider making Store::get return &Arc not Arc
-            let node = self.data_store.get(stored_idx)?;
+            let node = data_store.get(stored_idx)?;
 
             match node {
                 NodeOrLeaf::Node(node) => {
@@ -502,6 +506,9 @@ impl<S: Store> MerkleBTreeTxn<S> {
     ) -> Result<Remove<S>, S::Error> {
         match node {
             NodeRef::Stored(idx) => {
+                if Self::get_stored(data_store, *idx, key)?.is_none() {
+                    return Ok(Remove::NotPresent);
+                }
                 *node = NodeRef::from(data_store.get(*idx)?);
 
                 // TODO use loop and break

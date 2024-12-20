@@ -553,6 +553,8 @@ impl<S: Store> Transaction<S> {
                                     key_position
                                 }
                                 Node::Leaf(leaf) => {
+                                    // This should always be true because we checked that the key exists via Self::get_stored_node
+                                    // Leaving it here in case we add a remove that doesn't first check if the key exists.
                                     if &leaf.key_hash == key_hash {
                                         *parent_node_ref = mem::replace(
                                             unmatched_child,
@@ -560,12 +562,27 @@ impl<S: Store> Transaction<S> {
                                         );
                                         return Ok(Some(leaf.value.clone()));
                                     } else {
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            unreachable!(
+                                                "We previously checked that the key exists"
+                                            );
+                                        }
+                                        #[allow(unreachable_code)]
                                         return Ok(None);
                                     }
                                 }
                             }
                         }
-                        NodeRef::ModBranch(_) => key_position,
+                        NodeRef::ModBranch(_) => {
+                            // This code path continues below the match
+                            // It is the equivalent of this assignment and continue.
+                            // The assignment to parent_node_ref must be done outside the match to satisfy the borrow checker.
+                            //
+                            // parent_node_ref = matched_child;
+                            // continue;
+                            key_position
+                        }
                         NodeRef::ModLeaf(leaf) => {
                             if leaf.key_hash == *key_hash {
                                 let leaf = mem::replace(matched_child, NodeRef::temp_null_stored());
@@ -584,6 +601,8 @@ impl<S: Store> Transaction<S> {
                 }
             };
 
+            // This code path is only taken if the matched_child is a ModBranch
+            // See the comment there.
             let NodeRef::ModBranch(branch) = parent_node_ref else {
                 unreachable!("We just matched a ModBranch");
             };
