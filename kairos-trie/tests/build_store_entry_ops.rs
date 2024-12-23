@@ -45,9 +45,28 @@ fn end_to_end_entry_ops(batches: Vec<Vec<Operation>>) {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+    #[test]
+    fn prop_end_to_end_entry_ops_big(
+        batches in arb_batches(1..50_000usize, 1..100_000usize, 1000, 10_000)) {
+        end_to_end_entry_ops(batches);
+    }
+
     #[test]
     fn prop_end_to_end_entry_ops(
         batches in arb_batches(1..5000usize, 1..100_000usize, 1000, 10_000)) {
+        end_to_end_entry_ops(batches);
+    }
+
+    #[test]
+    fn prop_end_to_end_entry_ops_small(
+        batches in arb_batches(1..500usize, 1..100_000usize, 10_000, 10_000)) {
+        end_to_end_entry_ops(batches);
+    }
+
+    #[test]
+    fn prop_end_to_end_entry_ops_tiny(
+        batches in arb_batches(1..50usize, 1..100_000usize, 10_000, 10_000)) {
         end_to_end_entry_ops(batches);
     }
 }
@@ -213,7 +232,10 @@ fn mixed_operations_multiple_batches() {
             Operation::Get(KeyHash([4, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Remove(KeyHash([5, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Get(KeyHash([5, 0, 0, 0, 0, 0, 0, 0])),
-            Operation::EntryAndModifyOrInsert(KeyHash([6, 0, 0, 0, 0, 0, 0, 0]), 5u64.to_le_bytes()),
+            Operation::EntryAndModifyOrInsert(
+                KeyHash([6, 0, 0, 0, 0, 0, 0, 0]),
+                5u64.to_le_bytes(),
+            ),
             Operation::EntryOrInsert(KeyHash([6, 0, 0, 0, 0, 0, 0, 0]), 6u64.to_le_bytes()),
         ],
         vec![
@@ -231,7 +253,10 @@ fn mixed_operations_multiple_batches() {
             Operation::Get(KeyHash([10, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Remove(KeyHash([11, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Get(KeyHash([11, 0, 0, 0, 0, 0, 0, 0])),
-            Operation::EntryAndModifyOrInsert(KeyHash([12, 0, 0, 0, 0, 0, 0, 0]), 12u64.to_le_bytes()),
+            Operation::EntryAndModifyOrInsert(
+                KeyHash([12, 0, 0, 0, 0, 0, 0, 0]),
+                12u64.to_le_bytes(),
+            ),
             Operation::EntryOrInsert(KeyHash([12, 0, 0, 0, 0, 0, 0, 0]), 13u64.to_le_bytes()),
         ],
         vec![
@@ -249,7 +274,10 @@ fn mixed_operations_multiple_batches() {
             Operation::Get(KeyHash([16, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Remove(KeyHash([17, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Get(KeyHash([17, 0, 0, 0, 0, 0, 0, 0])),
-            Operation::EntryAndModifyOrInsert(KeyHash([18, 0, 0, 0, 0, 0, 0, 0]), 19u64.to_le_bytes()),
+            Operation::EntryAndModifyOrInsert(
+                KeyHash([18, 0, 0, 0, 0, 0, 0, 0]),
+                19u64.to_le_bytes(),
+            ),
             Operation::EntryOrInsert(KeyHash([18, 0, 0, 0, 0, 0, 0, 0]), 20u64.to_le_bytes()),
         ],
         vec![
@@ -267,7 +295,10 @@ fn mixed_operations_multiple_batches() {
             Operation::Get(KeyHash([22, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Remove(KeyHash([23, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Get(KeyHash([23, 0, 0, 0, 0, 0, 0, 0])),
-            Operation::EntryAndModifyOrInsert(KeyHash([24, 0, 0, 0, 0, 0, 0, 0]), 26u64.to_le_bytes()),
+            Operation::EntryAndModifyOrInsert(
+                KeyHash([24, 0, 0, 0, 0, 0, 0, 0]),
+                26u64.to_le_bytes(),
+            ),
             Operation::EntryOrInsert(KeyHash([24, 0, 0, 0, 0, 0, 0, 0]), 27u64.to_le_bytes()),
         ],
         vec![
@@ -285,7 +316,10 @@ fn mixed_operations_multiple_batches() {
             Operation::Get(KeyHash([28, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Remove(KeyHash([29, 0, 0, 0, 0, 0, 0, 0])),
             Operation::Get(KeyHash([29, 0, 0, 0, 0, 0, 0, 0])),
-            Operation::EntryAndModifyOrInsert(KeyHash([30, 0, 0, 0, 0, 0, 0, 0]), 33u64.to_le_bytes()),
+            Operation::EntryAndModifyOrInsert(
+                KeyHash([30, 0, 0, 0, 0, 0, 0, 0]),
+                33u64.to_le_bytes(),
+            ),
             Operation::EntryOrInsert(KeyHash([30, 0, 0, 0, 0, 0, 0, 0]), 34u64.to_le_bytes()),
         ],
     ];

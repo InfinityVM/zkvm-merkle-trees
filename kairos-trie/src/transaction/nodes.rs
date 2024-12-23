@@ -148,7 +148,10 @@ pub struct BranchMask {
 }
 
 impl BranchMask {
-    pub const fn new(word_idx: u32, a: u32, b: u32) -> Self {
+    /// Create a new branch mask.
+    /// `a` and `b` must not be equal.
+    pub fn new(word_idx: u32, a: u32, b: u32) -> Self {
+        debug_assert_ne!(a, b);
         Self::new_inner(word_idx, a, a ^ b)
     }
 
@@ -240,6 +243,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(1_000_000))]
         #[test]
         fn test_branch_mask(word_idx in 0u32..8, a: u32, b: u32) {
+            prop_assume!(a != b);
             let mask = BranchMask::new(word_idx, a, b);
 
             match (mask.is_left_descendant(a),
@@ -259,7 +263,6 @@ mod tests {
 
             }
         }
-
     }
 }
 
