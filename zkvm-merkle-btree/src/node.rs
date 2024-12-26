@@ -1,14 +1,13 @@
-use core::iter;
-
 use alloc::sync::Arc;
+use core::iter;
 
 use arrayvec::ArrayVec;
 use kairos_trie::{PortableHash, PortableUpdate};
 
-use crate::store::Idx;
+use crate::{store::Idx, transaction::Insert_};
 
 /// TODO make it configurable
-pub const BTREE_ORDER: usize = 10;
+pub const BTREE_ORDER: usize = 2;
 pub const EMPTY_TREE_ROOT_HASH: [u8; 32] = [0; 32];
 
 pub type NodeHash = [u8; 32];
@@ -29,20 +28,25 @@ pub type NodeHash = [u8; 32];
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeRep<K, NR> {
     // TODO consider using a sparse array to avoid needless copying
-    pub keys: ArrayVec<K, { BTREE_ORDER * 2 - 1 }>,
+    /// An Inner Node has at most `BTREE_ORDER * 2 - 1` keys.
+    /// A node with the same number of keys and children is a leaf node.
+    pub keys: ArrayVec<K, { BTREE_ORDER * 2 }>,
     pub children: ArrayVec<NR, { BTREE_ORDER * 2 }>,
 }
 
-pub type Node<K, V> = NodeRep<K, NodeRef<K, V>>;
-pub type NodeSnapshot<K> = NodeRep<K, Idx>;
+pub type InnerNode<K, V> = NodeRep<K, NodeRefType<K, V>>;
+pub type LeafNode<K, V> = NodeRep<K, V>;
 
-impl<K: Ord + Clone, V: Clone> Node<K, V> {
-    pub fn is_full(&self) -> bool {
-        self.keys.len() == BTREE_ORDER * 2 - 1
+pub type InnerNodeSnapshot<K> = NodeRep<K, Idx>;
+
+// TODO consider making these specialized for inner and outer nodes
+impl<K, V> NodeRep<K, V> {
+    pub const fn is_full(&self) -> bool {
+        self.children.len() == Self::max_children()
     }
 
     pub fn is_to_small(&self) -> bool {
-        self.keys.len() < Self::min_keys()
+        self.children.len() < Self::min_children()
     }
 
     pub const fn max_children() -> usize {
@@ -53,12 +57,70 @@ impl<K: Ord + Clone, V: Clone> Node<K, V> {
         BTREE_ORDER
     }
 
-    pub const fn max_keys() -> usize {
+    pub const fn max_inner_node_keys() -> usize {
         BTREE_ORDER * 2 - 1
     }
 
     pub const fn min_keys() -> usize {
         BTREE_ORDER - 1
+    }
+
+    #[track_caller]
+    pub fn assert_keys_sorted(&self)
+    where
+        K: Ord,
+    {
+        for i in 1..self.keys.len() {
+            assert!(self.keys[i - 1] < self.keys[i],);
+        }
+    }
+}
+
+impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
+    /// Splits an inner node, If the parent node (`self`) is full this function will return a `SplitNode`.
+    /// The split node contains the middle key and the right sibling node of the parent node.
+    /// The parent becomes the left sibling node.
+    /// The caller must propagate the split up the tree.
+    pub(crate) fn handle_split(
+        &mut self,
+        idx: usize,
+        middle_key: K,
+        new_right: InnerOuter<Arc<InnerNode<K, V>>, Arc<LeafNode<K, V>>>,
+    ) -> Insert_<K, V> {
+        if !self.is_full() {
+            self.keys.insert(idx, middle_key);
+            self.children.insert(idx + 1, new_right.into());
+
+            Insert_::Inserted
+        } else {
+            let mut new_right_inner = NodeRep {
+                keys: self.keys.drain((Self::min_keys() + 1)..).collect(),
+                children: self.children.drain(Self::min_children()..).collect(),
+            };
+            let new_middle_key = self.keys.pop().unwrap();
+
+            if idx < Self::min_children() {
+                self.keys.insert(idx, middle_key);
+                self.children.insert(idx + 1, new_right.into());
+            } else {
+                let adjusted_idx = idx - Self::min_children();
+                new_right_inner.keys.insert(adjusted_idx, middle_key);
+                new_right_inner
+                    .children
+                    .insert(adjusted_idx + 1, new_right.into());
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                self.assert_inner_invariants();
+                new_right_inner.assert_inner_invariants();
+            }
+
+            Insert_::SplitNode {
+                middle_key: new_middle_key,
+                right_node: Arc::new(new_right_inner),
+            }
+        }
     }
 
     /// Try to merge or balance the node with a sibling.
@@ -69,89 +131,163 @@ impl<K: Ord + Clone, V: Clone> Node<K, V> {
     /// This method will skip a stored sibling to avoid bloating the snapshot.
     /// The order of attempts is left merge, right merge, left balance, right balance.
     #[allow(clippy::result_unit_err)]
-    pub fn merge_or_balance(&mut self, underflow_idx: usize) -> Result<(), ()> {
-        let children_keys_len = self.children[underflow_idx].node().unwrap().keys.len();
-        debug_assert!(children_keys_len < Self::min_keys());
-
+    pub(crate) fn merge_or_balance(&mut self, underflow_idx: usize) -> Result<(), ()> {
+        debug_assert!(underflow_idx < self.children.len());
+        // By definition the underflowed node has one less than the minimum number of keys.
         let (left, underflowed, right) = if underflow_idx == 0 {
             let Some([underflow_idx, right, ..]) = self.children.get_mut(underflow_idx..) else {
-                return Ok(());
+                unreachable!();
             };
-            (&mut NodeRef::Null, underflow_idx, right)
+            (None, underflow_idx, Some(right))
         } else if underflow_idx + 1 == self.children.len() {
             let Some([left, underflow_idx, ..]) = self.children.get_mut(underflow_idx - 1..) else {
-                return Ok(());
+                unreachable!();
             };
-            (left, underflow_idx, &mut NodeRef::Null)
+            (Some(left), underflow_idx, None)
         } else {
+            debug_assert!(underflow_idx > 0);
+            debug_assert!(underflow_idx + 1 < self.children.len());
+
             let Some([left, underflow_idx, right, ..]) = self.children.get_mut(underflow_idx - 1..)
             else {
-                return Ok(());
+                unreachable!();
             };
 
-            (left, underflow_idx, right)
+            (Some(left), underflow_idx, Some(right))
         };
 
         match (left, underflowed, right) {
-            (NodeRef::Node(left_arc), NodeRef::Node(underflow_arc), _)
-                if left_arc.can_be_merged(underflow_arc) =>
+            // Try to merge left then right
+            (Some(NodeRefType::Leaf(left)), NodeRefType::Leaf(underflowed), _)
+                if left.can_leafs_be_merged(underflowed) =>
             {
-                let left_node = Arc::make_mut(left_arc);
-                let underflow_node = Arc::make_mut(underflow_arc);
-                let middle_key = self.keys.remove(underflow_idx - 1);
-                left_node.merge(middle_key, underflow_node);
+                let left = Arc::make_mut(left);
+                let underflowed = Arc::make_mut(underflowed);
+                left.merge_leafs(underflowed);
+                self.keys.remove(underflow_idx - 1);
                 self.children.remove(underflow_idx);
                 Ok(())
             }
 
-            (_, NodeRef::Node(underflow_arc), NodeRef::Node(right_arc))
-                if underflow_arc.can_be_merged(right_arc) =>
+            (_, NodeRefType::Leaf(underflowed), Some(NodeRefType::Leaf(right)))
+                if underflowed.can_leafs_be_merged(right) =>
             {
-                let underflow_node = Arc::make_mut(underflow_arc);
-                let right_node = Arc::make_mut(right_arc);
-                let middle_key = self.keys.remove(underflow_idx);
-                underflow_node.merge(middle_key, right_node);
+                let underflowed = Arc::make_mut(underflowed);
+                let right = Arc::make_mut(right);
+                underflowed.merge_leafs(right);
+                self.keys.remove(underflow_idx);
                 self.children.remove(underflow_idx + 1);
                 Ok(())
             }
 
-            (NodeRef::Node(left_arc), NodeRef::Node(underflow_arc), _) => {
-                debug_assert!(left_arc.keys.len() > Self::min_keys());
-
-                let left_node = Arc::make_mut(left_arc);
-                let underflow_node = Arc::make_mut(underflow_arc);
-
-                let middle_key = self.keys.get_mut(underflow_idx - 1).unwrap();
-                left_node.balance(middle_key, underflow_node);
-
+            // Try to balance left then right
+            (Some(NodeRefType::Leaf(left)), NodeRefType::Leaf(underflowed), _) => {
+                let left = Arc::make_mut(left);
+                let underflowed = Arc::make_mut(underflowed);
+                let middle_key = left.balance_leafs(underflowed);
+                self.keys[underflow_idx - 1] = middle_key;
                 Ok(())
             }
 
-            (_, NodeRef::Node(underflow_arc), NodeRef::Node(right_arc)) => {
-                debug_assert!(right_arc.keys.len() > Self::min_keys());
-
-                let underflow_node = Arc::make_mut(underflow_arc);
-                let right_node = Arc::make_mut(right_arc);
-
-                let middle_key = self.keys.get_mut(underflow_idx).unwrap();
-                underflow_node.balance(middle_key, right_node);
-
+            (_, NodeRefType::Leaf(underflowed), Some(NodeRefType::Leaf(right))) => {
+                let underflowed = Arc::make_mut(underflowed);
+                let right = Arc::make_mut(right);
+                let middle_key = underflowed.balance_leafs(right);
+                self.keys[underflow_idx] = middle_key;
                 Ok(())
             }
 
-            (NodeRef::Stored(_) | NodeRef::Null, _, NodeRef::Stored(_))
-            | (NodeRef::Stored(_), _, NodeRef::Null) => Err(()),
-
-            _ => {
-                unreachable!("merge_or_balance called on node with one child");
+            // Try to merge InnerNodes left then right
+            (Some(NodeRefType::Inner(left)), NodeRefType::Inner(underflowed), _)
+                if left.can_inner_nodes_be_merged(underflowed) =>
+            {
+                let left = Arc::make_mut(left);
+                let underflowed = Arc::make_mut(underflowed);
+                let middle_key = self.keys.remove(underflow_idx - 1);
+                left.merge_inner_nodes(middle_key, underflowed);
+                self.children.remove(underflow_idx);
+                Ok(())
             }
+
+            (_, NodeRefType::Inner(underflowed), Some(NodeRefType::Inner(right)))
+                if underflowed.can_inner_nodes_be_merged(right) =>
+            {
+                let underflowed = Arc::make_mut(underflowed);
+                let right = Arc::make_mut(right);
+                let middle_key = self.keys.remove(underflow_idx);
+                underflowed.merge_inner_nodes(middle_key, right);
+                self.children.remove(underflow_idx + 1);
+                Ok(())
+            }
+
+            // Try to balance InnerNodes left then right
+            (Some(NodeRefType::Inner(left)), NodeRefType::Inner(underflowed), _) => {
+                let left = Arc::make_mut(left);
+                let underflowed = Arc::make_mut(underflowed);
+                left.balance_inner_nodes(&mut self.keys[underflow_idx - 1], underflowed);
+                Ok(())
+            }
+
+            (_, NodeRefType::Inner(underflowed), Some(NodeRefType::Inner(right))) => {
+                let underflowed = Arc::make_mut(underflowed);
+                let right = Arc::make_mut(right);
+                underflowed.balance_inner_nodes(&mut self.keys[underflow_idx], right);
+                Ok(())
+            }
+
+            // We can't merge or balance with stored nodes
+            (Some(NodeRefType::Stored(_)) | None, _, Some(NodeRefType::Stored(_)))
+            | (Some(NodeRefType::Stored(_)), _, None) => Err(()),
+
+            _ => unreachable!("An InnerNode should only have one type of children"),
         }
     }
 
-    pub fn balance(&mut self, middle_key: &mut K, right_node: &mut Self) {
+    fn can_inner_nodes_be_merged(&self, right_node: &Self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            match (self.keys.as_slice(), right_node.keys.as_slice()) {
+                ([.., left_last], [right_first, ..]) => assert!(left_last < right_first),
+                ([], _) => assert!(self.children.len() == 1),
+                (_, []) => assert!(right_node.children.len() == 1),
+            };
+        }
+
+        // We use less than because the middle key from the parent also needs to be added.
+        self.keys.len() + right_node.keys.len() < Self::max_inner_node_keys()
+    }
+
+    fn merge_inner_nodes(&mut self, middle_key: K, right_node: &mut Self) {
+        #[cfg(debug_assertions)]
+        {
+            self.assert_inner_invariants();
+            right_node.assert_inner_invariants();
+        }
+
+        let key_count = self.keys.len() + 1 + right_node.keys.len();
+        let child_count = self.children.len() + right_node.children.len();
+        debug_assert_eq!(key_count, child_count - 1);
+        debug_assert!(key_count <= Self::max_inner_node_keys());
+        debug_assert!(child_count <= Self::max_children());
+
+        self.keys.push(middle_key);
+        self.keys.extend(right_node.keys.drain(..));
+
+        self.children.extend(right_node.children.drain(..));
+
+        #[cfg(debug_assertions)]
+        self.assert_inner_invariants();
+    }
+
+    fn balance_inner_nodes(&mut self, middle_key: &mut K, right_node: &mut Self) {
+        #[cfg(debug_assertions)]
+        {
+            self.assert_inner_invariants();
+            right_node.assert_inner_invariants();
+        }
         // assert that we could not merge
         // one is the middle key from the parent
-        debug_assert!(self.keys.len() + 1 + right_node.keys.len() > Self::max_keys());
+        debug_assert!(self.keys.len() + 1 + right_node.keys.len() > Self::max_inner_node_keys());
         debug_assert!(self.children.len() + right_node.children.len() > Self::max_children());
 
         let child_count = self.children.len() + right_node.children.len();
@@ -164,8 +300,12 @@ impl<K: Ord + Clone, V: Clone> Node<K, V> {
             .chain(iter::once(middle_key.clone()))
             .chain(right_node.keys.drain(..));
 
+        // The last key that would be in the left node is the middle key.
         let left_keys = (&mut keys).take(left_count - 1).collect();
+
+        // The middle key partitions the left and right in the parent node.
         *middle_key = keys.next().unwrap();
+
         let right_key = keys.collect();
         let left_children = (&mut children).take(left_count).collect();
         let right_children = children.collect();
@@ -176,105 +316,134 @@ impl<K: Ord + Clone, V: Clone> Node<K, V> {
         right_node.keys = right_key;
         right_node.children = right_children;
 
-        self.assert_invariants();
-        right_node.assert_invariants();
+        #[cfg(debug_assertions)]
+        {
+            self.assert_inner_invariants();
+            assert!(self.keys.len() >= Self::min_keys());
+
+            right_node.assert_inner_invariants();
+            assert!(right_node.keys.len() >= Self::min_keys());
+        }
     }
 
-    pub fn merge(&mut self, middle_key: K, right_node: &mut Self) {
-        let key_count = self.keys.len() + 1 + right_node.keys.len();
-        let child_count = self.children.len() + right_node.children.len();
-        debug_assert!(key_count <= Self::max_keys());
-        debug_assert!(child_count <= Self::max_children());
-        debug_assert!(key_count == child_count - 1);
+    #[track_caller]
+    pub fn assert_inner_invariants(&self) {
+        self.assert_keys_sorted();
+        assert_eq!(self.keys.len(), self.children.len() - 1);
+    }
+}
 
-        self.keys.push(middle_key);
+impl<K: Clone + Ord, V> LeafNode<K, V> {
+    /// Splits a leaf node, returning the middle key and the newly created right sibling node.
+    ///
+    /// This function takes the current node, the index where the key should be inserted, the key, and the value.
+    pub(crate) fn insert_split(&mut self, idx: usize, key: K, value: V) -> (K, Arc<Self>) {
+        #[cfg(debug_assertions)]
+        self.assert_leaf_invariants();
+
+        let mut new_right_leaf = NodeRep {
+            keys: self.keys.drain((Self::min_children())..).collect(),
+            children: self.children.drain(Self::min_children()..).collect(),
+        };
+
+        if idx < Self::min_children() {
+            self.keys.insert(idx, key);
+            self.children.insert(idx, value);
+        } else {
+            let adjusted_idx = idx - Self::min_children();
+            new_right_leaf.keys.insert(adjusted_idx, key);
+            new_right_leaf.children.insert(adjusted_idx, value);
+        }
+
+        let middle_key = self.keys.last().unwrap().clone();
+
+        #[cfg(debug_assertions)]
+        {
+            self.assert_leaf_invariants();
+            new_right_leaf.assert_leaf_invariants();
+        }
+
+        (middle_key.clone(), Arc::new(new_right_leaf))
+    }
+
+    /// Merge the leafs into the left leaf (self).
+    /// Caller must remove the right leaf from the parent node.
+    pub fn merge_leafs(&mut self, right_node: &mut Self) {
+        let key_count = self.keys.len() + right_node.keys.len();
+        let child_count = self.children.len() + right_node.children.len();
+        debug_assert_eq!(key_count, child_count);
+        debug_assert!(child_count <= Self::max_children());
+
         self.keys.extend(right_node.keys.drain(..));
 
         self.children.extend(right_node.children.drain(..));
 
-        self.assert_invariants();
+        self.assert_leaf_invariants();
     }
 
     #[inline(always)]
-    fn can_be_merged(&self, right_node: &Self) -> bool {
+    fn can_leafs_be_merged(&self, right_node: &Self) -> bool {
         #[cfg(debug_assertions)]
+        if let ([.., left_last], [right_first, ..]) =
+            (self.keys.as_slice(), right_node.keys.as_slice())
         {
-            match (self.keys.as_slice(), right_node.keys.as_slice()) {
-                ([.., left_last], [right_first, ..]) => assert!(left_last < right_first),
-                ([], _) => assert!(self.children.len() == 1),
-                (_, []) => assert!(right_node.children.len() == 1),
-            };
-        }
+            assert!(left_last < right_first)
+        };
 
         // We use less than because the middle key from the parent also needs to be added.
-        self.keys.len() + right_node.keys.len() < Self::max_keys()
+        self.children.len() + right_node.children.len() <= Self::max_children()
+    }
+
+    // Balance the leafs, returning the new middle key.
+    pub fn balance_leafs(&mut self, right_node: &mut Self) -> K {
+        #[cfg(debug_assertions)]
+        {
+            self.assert_leaf_invariants();
+            right_node.assert_leaf_invariants();
+        }
+        // assert that we could not merge
+        // one is the middle key from the parent
+        debug_assert!(self.children.len() + right_node.children.len() > Self::max_children());
+
+        let child_count = self.children.len() + right_node.children.len();
+        let left_count = child_count / 2;
+        // This is not the most efficient way of doing this, but we need to replace the ArrayVec anyway.
+        let mut children = self.children.drain(..).chain(right_node.children.drain(..));
+        let mut keys = self.keys.drain(..).chain(right_node.keys.drain(..));
+
+        let left_keys = (&mut keys).take(left_count).collect();
+        let right_key = keys.collect();
+        let left_children = (&mut children).take(left_count).collect();
+        let right_children = children.collect();
+
+        self.keys = left_keys;
+        self.children = left_children;
+
+        right_node.keys = right_key;
+        right_node.children = right_children;
+
+        #[cfg(debug_assertions)]
+        {
+            self.assert_leaf_invariants();
+            assert!(self.keys.len() >= Self::min_keys());
+
+            right_node.assert_leaf_invariants();
+            assert!(right_node.keys.len() >= Self::min_keys());
+        }
+
+        // Return the new middle key
+        self.keys.last().unwrap().clone()
     }
 
     #[track_caller]
-    pub fn assert_keys_sorted(&self) {
-        for i in 1..self.keys.len() {
-            assert!(self.keys[i - 1] < self.keys[i],);
-        }
-    }
-
-    #[track_caller]
-    pub fn assert_children_sorted(&self) {
-        let mut prior_child_key = None;
-        for (i, child) in self.children.iter().enumerate() {
-            match child {
-                NodeRef::Leaf(leaf) => {
-                    let _ = self.keys.get(i).map(|key| assert!(*key >= leaf.key,));
-
-                    if let Some(prior_key) = prior_child_key {
-                        assert!(prior_key < &leaf.key);
-                    }
-                    prior_child_key = Some(&leaf.key);
-                }
-                NodeRef::Node(node) => {
-                    let _ = self
-                        .keys
-                        .get(i)
-                        .map(|key| assert!(key >= node.keys.last().unwrap()));
-
-                    if let Some(child_key) = node.keys.last() {
-                        if let Some(prior_key) = prior_child_key {
-                            assert!(prior_key < child_key);
-                        }
-                        prior_child_key = Some(child_key);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    #[track_caller]
-    pub fn assert_invariants(&self) {
-        let all_children_are_leafs = self
-            .children
-            .iter()
-            .all(|child| matches!(child, NodeRef::Leaf(_)));
-
-        if !all_children_are_leafs {
-            // Fix with root check
-            // assert!(self.keys.len() >= Self::min_keys());
-            // assert!(self.children.len() >= Self::min_children());
-        }
-
-        assert!(self.keys.len() <= Self::max_keys());
-        assert!(self.children.len() <= Self::max_children());
-
-        assert_eq!(self.keys.len() + 1, self.children.len());
-
+    pub fn assert_leaf_invariants(&self) {
         self.assert_keys_sorted();
-        self.assert_children_sorted();
+        assert_eq!(self.keys.len(), self.children.len());
+        // assert!(self.keys.len() >= Self::min_keys());
     }
 }
 
-impl<K> PortableHash for NodeRep<K, NodeHash>
-where
-    K: PortableHash,
-{
+impl<K: PortableHash, V: PortableHash> PortableHash for NodeRep<K, V> {
     fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
         // TODO: Add size to hash
         self.keys.iter().for_each(|key| key.portable_hash(hasher));
@@ -296,138 +465,83 @@ impl<K: PortableHash, NR> NodeRep<K, NR> {
     }
 }
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Leaf<K, V> {
-    pub key: K,
-    pub value: V,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InnerOuter<N, L> {
+    Inner(N),
+    Outer(L),
 }
 
-impl<K: PortableHash, V: PortableHash> PortableHash for Leaf<K, V> {
-    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
-        self.key.portable_hash(hasher);
-        self.value.portable_hash(hasher);
+impl<K: Clone, V: Clone> From<InnerOuterSnapshotRef<'_, K, V>> for NodeRefType<K, V> {
+    fn from(node_or_leaf: InnerOuterSnapshotRef<K, V>) -> Self {
+        match node_or_leaf {
+            InnerOuter::Outer(leaf) => NodeRefType::Leaf(Arc::new(leaf.clone())),
+            InnerOuter::Inner(node) => NodeRefType::Inner(Arc::new(NodeRep {
+                keys: node.keys.clone(),
+                children: node
+                    .children
+                    .iter()
+                    .map(|idx| NodeRefType::Stored(*idx))
+                    .collect(),
+            })),
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum NodeOrLeaf<N, L> {
-    Node(N),
-    Leaf(L),
-}
+pub type NodeOrLeafDb<K, V> = InnerOuter<NodeRep<K, NodeHash>, LeafNode<K, V>>;
+pub type InnerOuterSnapshotRef<'a, K, V> = InnerOuter<&'a InnerNodeSnapshot<K>, &'a LeafNode<K, V>>;
+pub type InnerOuterSnapshotArc<K, V> = InnerOuter<Arc<InnerNodeSnapshot<K>>, Arc<LeafNode<K, V>>>;
 
-pub type NodeOrLeafRef<'a, K, V> = NodeOrLeaf<&'a Arc<Node<K, V>>, &'a Arc<Leaf<K, V>>>;
-pub type NodeOrLeafOwned<K, V> = NodeOrLeaf<Arc<Node<K, V>>, Arc<Leaf<K, V>>>;
-pub type NodeOrLeafDb<K, V> = NodeOrLeaf<NodeRep<K, NodeHash>, Leaf<K, V>>;
-pub type NodeOrLeafSnapshotRef<'a, K, V> = NodeOrLeaf<&'a NodeSnapshot<K>, &'a Leaf<K, V>>;
-pub type NodeOrLeafSnapshotArc<K, V> = NodeOrLeaf<Arc<NodeSnapshot<K>>, Arc<Leaf<K, V>>>;
-
-impl<N, L> NodeOrLeaf<N, L> {
+impl<N, L> InnerOuter<N, L> {
     pub fn node(&self) -> Option<&N> {
         match self {
-            NodeOrLeaf::Node(node) => Some(node),
+            InnerOuter::Inner(node) => Some(node),
             _ => None,
         }
     }
 
     pub fn leaf(&self) -> Option<&L> {
         match self {
-            NodeOrLeaf::Leaf(leaf) => Some(leaf),
+            InnerOuter::Outer(leaf) => Some(leaf),
             _ => None,
-        }
-    }
-}
-
-impl<K, V> NodeOrLeafOwned<K, V> {
-    pub fn as_ref(&self) -> NodeOrLeaf<&Arc<Node<K, V>>, &Arc<Leaf<K, V>>> {
-        match self {
-            NodeOrLeaf::Node(node) => NodeOrLeaf::Node(node),
-            NodeOrLeaf::Leaf(leaf) => NodeOrLeaf::Leaf(leaf),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum NodeRef<K, V> {
-    Node(Arc<Node<K, V>>),
-    // TODO it should be a hash if the value is very large
-    // TODO Fix leaf
-    Leaf(Arc<Leaf<K, V>>),
+pub enum NodeRefType<K, V> {
+    Inner(Arc<InnerNode<K, V>>),
+    Leaf(Arc<LeafNode<K, V>>),
     Stored(Idx),
-    Null,
 }
 
-impl<K, V> NodeRef<K, V> {
-    pub fn node(&self) -> Option<&Arc<Node<K, V>>> {
+impl<K, V> NodeRefType<K, V> {
+    pub fn inner(&self) -> Option<&Arc<InnerNode<K, V>>> {
         match self {
-            NodeRef::Node(node) => Some(node),
+            NodeRefType::Inner(node) => Some(node),
             _ => None,
         }
     }
 
-    pub fn leaf(&self) -> Option<&Arc<Leaf<K, V>>> {
+    pub fn leaf(&self) -> Option<&Arc<LeafNode<K, V>>> {
         match self {
-            NodeRef::Leaf(leaf) => Some(leaf),
+            NodeRefType::Leaf(leaf) => Some(leaf),
             _ => None,
         }
     }
 
     pub fn stored(&self) -> Option<Idx> {
         match self {
-            NodeRef::Stored(idx) => Some(*idx),
+            NodeRefType::Stored(idx) => Some(*idx),
             _ => None,
         }
     }
 }
 
-impl<K, V> NodeRef<K, V> {
-    pub fn new_leaf(key: K, value: V) -> Self {
-        NodeRef::Leaf(Arc::new(Leaf { key, value }))
-    }
-}
-
-impl<K: Clone, V: Clone> From<NodeOrLeafSnapshotRef<'_, K, V>> for NodeRef<K, V> {
-    fn from(node_or_leaf: NodeOrLeafSnapshotRef<K, V>) -> Self {
+impl<K, V> From<InnerOuter<Arc<InnerNode<K, V>>, Arc<LeafNode<K, V>>>> for NodeRefType<K, V> {
+    fn from(node_or_leaf: InnerOuter<Arc<InnerNode<K, V>>, Arc<LeafNode<K, V>>>) -> Self {
         match node_or_leaf {
-            NodeOrLeaf::Node(node) => NodeRef::Node(Arc::new(NodeRep {
-                keys: node.keys.clone(),
-                children: node
-                    .children
-                    .iter()
-                    .map(|idx| NodeRef::Stored(*idx))
-                    .collect(),
-            })),
-            NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(Arc::new(leaf.clone())),
-        }
-    }
-}
-
-impl<K, V> From<Arc<Node<K, V>>> for NodeRef<K, V> {
-    fn from(node: Arc<Node<K, V>>) -> Self {
-        NodeRef::Node(node)
-    }
-}
-
-impl<K, V> From<Arc<Leaf<K, V>>> for NodeRef<K, V> {
-    fn from(leaf: Arc<Leaf<K, V>>) -> Self {
-        NodeRef::Leaf(leaf)
-    }
-}
-
-impl<K, V> From<NodeOrLeafOwned<K, V>> for NodeRef<K, V> {
-    fn from(node_or_leaf: NodeOrLeafOwned<K, V>) -> Self {
-        match node_or_leaf {
-            NodeOrLeaf::Node(node) => NodeRef::Node(node),
-            NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(leaf),
-        }
-    }
-}
-
-impl<K, V> From<NodeOrLeafRef<'_, K, V>> for NodeRef<K, V> {
-    fn from(node_or_leaf: NodeOrLeafRef<'_, K, V>) -> Self {
-        match node_or_leaf {
-            NodeOrLeaf::Node(node) => NodeRef::Node(node.clone()),
-            NodeOrLeaf::Leaf(leaf) => NodeRef::Leaf(leaf.clone()),
+            InnerOuter::Inner(node) => NodeRefType::Inner(node),
+            InnerOuter::Outer(leaf) => NodeRefType::Leaf(leaf),
         }
     }
 }

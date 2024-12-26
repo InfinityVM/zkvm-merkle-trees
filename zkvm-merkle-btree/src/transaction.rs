@@ -1,31 +1,548 @@
 use alloc::sync::Arc;
-use core::fmt::Debug;
-use core::{cmp::Ordering, mem};
-use std::cmp;
+use core::{cmp, mem};
 
 use arrayvec::ArrayVec;
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::db::{DatabaseGet, DatabaseSet};
-use crate::node::{NodeRep, BTREE_ORDER};
-use crate::snapshot::{Snapshot, VerifiedSnapshot};
 use crate::{
-    node::{Leaf, Node, NodeHash, NodeOrLeaf, NodeRef, EMPTY_TREE_ROOT_HASH},
-    snapshot::SnapshotBuilder,
+    db::{DatabaseGet, DatabaseSet},
+    node::{
+        InnerNode, InnerOuter, LeafNode, NodeHash, NodeRefType, NodeRep, BTREE_ORDER,
+        EMPTY_TREE_ROOT_HASH,
+    },
+    snapshot::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
     store::{Idx, Store},
 };
 
 /// A transaction against a merkle b+tree.
 pub struct MerkleBTreeTxn<S: Store> {
     pub data_store: S,
-    current_root: NodeRef<S::Key, S::Value>,
+    current_root: Option<NodeRefType<S::Key, S::Value>>,
 }
 
-impl<
-        K: Ord + Clone + PortableHash + Debug,
-        V: Clone + PortableHash + Debug,
-        Db: DatabaseGet<K, V>,
-    > MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
+impl<S: Store> MerkleBTreeTxn<S> {
+    /// Calculate the root hash of the trie.
+    ///
+    /// Caller must ensure that the hasher is reset before calling this method.
+    #[inline]
+    pub fn calc_root_hash(
+        &self,
+        hasher: &mut impl PortableHasher<32>,
+    ) -> Result<NodeHash, S::Error> {
+        self.calc_root_hash_inner(hasher, &mut |_, _| Ok(()), &mut |_, _, _| Ok(()))
+    }
+
+    fn calc_root_hash_inner(
+        &self,
+        hasher: &mut impl PortableHasher<32>,
+        on_modified_leaf: &mut impl FnMut(
+            &NodeHash,
+            &LeafNode<S::Key, S::Value>,
+        ) -> Result<(), S::Error>,
+        on_modified_branch: &mut impl FnMut(
+            &NodeHash,
+            &InnerNode<S::Key, S::Value>,
+            &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
+        ) -> Result<(), S::Error>,
+    ) -> Result<NodeHash, S::Error> {
+        match &self.current_root {
+            None => Ok(EMPTY_TREE_ROOT_HASH),
+            Some(node_ref) => Self::calc_root_hash_node(
+                hasher,
+                &self.data_store,
+                node_ref,
+                on_modified_leaf,
+                on_modified_branch,
+            ),
+        }
+    }
+
+    #[inline]
+    fn calc_root_hash_node(
+        hasher: &mut impl PortableHasher<32>,
+        data_store: &S,
+        node_ref: &NodeRefType<S::Key, S::Value>,
+        on_modified_leaf: &mut impl FnMut(
+            &NodeHash,
+            &LeafNode<S::Key, S::Value>,
+        ) -> Result<(), S::Error>,
+        on_modified_branch: &mut impl FnMut(
+            &NodeHash,
+            &InnerNode<S::Key, S::Value>,
+            &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
+        ) -> Result<(), S::Error>,
+    ) -> Result<NodeHash, S::Error> {
+        match node_ref {
+            NodeRefType::Inner(node) => {
+                const MAX_CHILDREN: usize = BTREE_ORDER * 2;
+                debug_assert!(MAX_CHILDREN == InnerNode::<S::Key, S::Value>::max_children());
+
+                // TODO: this a lot of stack space, consider using a heap allocated stack.
+                // The direct recursion is less of an issue than with the trie because the tree is much shallower.
+                // But the stack usage is much higher per node.
+                let mut child_hashes = ArrayVec::<NodeHash, MAX_CHILDREN>::new();
+
+                for child in &node.children {
+                    let child_hash = Self::calc_root_hash_node(
+                        hasher,
+                        data_store,
+                        child,
+                        on_modified_leaf,
+                        on_modified_branch,
+                    )?;
+                    child_hashes.push(child_hash);
+                }
+
+                node.portable_hash_iter(hasher, child_hashes.iter());
+                let hash = hasher.finalize_reset();
+
+                on_modified_branch(&hash, node, &child_hashes)?;
+
+                Ok(hash)
+            }
+            NodeRefType::Leaf(leaf) => {
+                leaf.portable_hash(hasher);
+                let hash = hasher.finalize_reset();
+
+                on_modified_leaf(&hash, leaf)?;
+
+                Ok(hash)
+            }
+            NodeRefType::Stored(stored_idx) => data_store.calc_subtree_hash(hasher, *stored_idx),
+        }
+    }
+
+    pub fn get(&self, key: &S::Key) -> Result<Option<&S::Value>, S::Error> {
+        match &self.current_root {
+            None => Ok(None),
+            Some(NodeRefType::Inner(node)) => Self::get_inner(&self.data_store, node, key),
+            Some(NodeRefType::Leaf(leaf)) => match leaf.keys.binary_search(key) {
+                Ok(idx) => Ok(Some(&leaf.children[idx])),
+                Err(_) => Ok(None),
+            },
+            Some(NodeRefType::Stored(idx)) => Self::get_stored(&self.data_store, *idx, key),
+        }
+    }
+
+    /// Get the value associated with the key.
+    ///
+    /// Caller must ensure the parent_node is not empty node, and has one more child than keys.
+    /// The root node could be an empty outer node, but a Root node should never be an inner empty node.
+    fn get_inner<'s>(
+        data_store: &'s S,
+        mut parent_node: &'s InnerNode<S::Key, S::Value>,
+        key: &S::Key,
+    ) -> Result<Option<&'s S::Value>, S::Error> {
+        loop {
+            let idx = match parent_node.keys.binary_search(key) {
+                Ok(equal_key_idx) => equal_key_idx,
+                Err(idx) => idx,
+            };
+
+            match &parent_node.children[idx] {
+                NodeRefType::Inner(child) => {
+                    parent_node = child;
+                }
+                NodeRefType::Leaf(leaf) => match leaf.keys.binary_search(key) {
+                    Ok(idx) => return Ok(Some(&leaf.children[idx])),
+                    Err(_) => return Ok(None),
+                },
+                NodeRefType::Stored(idx) => {
+                    return Self::get_stored(data_store, *idx, key);
+                }
+            }
+        }
+    }
+
+    /// Get the value associated with the key from the `Store` (`Snapshot` or `SnapshotBuilder`).
+    fn get_stored<'s>(
+        data_store: &'s S,
+        mut stored_idx: Idx,
+        key: &S::Key,
+    ) -> Result<Option<&'s S::Value>, S::Error> {
+        loop {
+            let node = data_store.get(stored_idx)?;
+
+            match node {
+                InnerOuter::Inner(node) => {
+                    let idx = match node.keys.binary_search(key) {
+                        Ok(idx) | Err(idx) => cmp::min(idx, node.children.len() - 1),
+                    };
+
+                    stored_idx = node.children[idx]
+                }
+                InnerOuter::Outer(leaf) => match leaf.keys.binary_search(key) {
+                    Ok(idx) => return Ok(Some(&leaf.children[idx])),
+                    Err(_) => return Ok(None),
+                },
+            }
+        }
+    }
+
+    pub fn insert(&mut self, key: S::Key, value: S::Value) -> Result<Option<S::Value>, S::Error> {
+        let (middle_key, new_right): (
+            S::Key,
+            InnerOuter<
+                Arc<NodeRep<S::Key, NodeRefType<S::Key, S::Value>>>,
+                Arc<NodeRep<S::Key, S::Value>>,
+            >,
+        ) = 'handle_split: {
+            match &mut self.current_root {
+                None => {
+                    self.current_root = Some(NodeRefType::Leaf(Arc::new(NodeRep {
+                        keys: ArrayVec::from_iter([key]),
+                        children: ArrayVec::from_iter([value]),
+                    })));
+
+                    return Ok(None);
+                }
+                Some(NodeRefType::Stored(stored_idx)) => {
+                    let node = self.data_store.get(*stored_idx)?.into();
+                    self.current_root = Some(node);
+                    return self.insert(key, value);
+                }
+                Some(NodeRefType::Inner(node)) => {
+                    let node = Arc::make_mut(node);
+
+                    match Self::insert_inner(&self.data_store, node, key, value)? {
+                        Insert_::Inserted => return Ok(None),
+                        Insert_::Replaced(old_value) => return Ok(Some(old_value)),
+                        Insert_::SplitNode {
+                            middle_key,
+                            right_node,
+                        } => break 'handle_split (middle_key, InnerOuter::Inner(right_node)),
+                    }
+                }
+                Some(NodeRefType::Leaf(leaf)) => {
+                    let leaf = Arc::make_mut(leaf);
+                    match leaf.keys.binary_search(&key) {
+                        Ok(idx) => {
+                            return Ok(Some(mem::replace(&mut leaf.children[idx], value)));
+                        }
+                        Err(idx) if !leaf.is_full() => {
+                            leaf.keys.insert(idx, key);
+                            leaf.children.insert(idx, value);
+                            return Ok(None);
+                        }
+                        Err(idx) => {
+                            let (middle_key, new_right_leaf) = leaf.insert_split(idx, key, value);
+                            break 'handle_split (middle_key, InnerOuter::Outer(new_right_leaf));
+                        }
+                    }
+                }
+            }
+        };
+
+        // A split occurred
+        let left_node = mem::replace(
+            &mut self.current_root,
+            Some(NodeRefType::Inner(Arc::new(InnerNode {
+                keys: ArrayVec::from_iter([middle_key]),
+                children: ArrayVec::new(),
+            }))),
+        );
+
+        match &mut self.current_root {
+            Some(NodeRefType::Inner(node)) => {
+                let node = Arc::make_mut(node);
+                // Only a empty tree could have a null root node
+                node.children.push(left_node.unwrap());
+                node.children.push(new_right.into());
+
+                #[cfg(debug_assertions)]
+                node.assert_inner_invariants();
+
+                Ok(None)
+            }
+            _ => unreachable!("The current root should always be an inner node"),
+        }
+    }
+
+    fn insert_inner<'s>(
+        data_store: &'s S,
+        parent_node: &'s mut InnerNode<S::Key, S::Value>,
+        key: S::Key,
+        value: S::Value,
+    ) -> Result<Insert_<S::Key, S::Value>, S::Error> {
+        let idx = match parent_node.keys.binary_search(&key) {
+            Ok(equal_key_idx) => equal_key_idx,
+            Err(idx) => idx,
+        };
+
+        // This loop is only used to restart the logic after attaching a stored node.
+        'handle_stored: loop {
+            // We do this hideous nested labels to satisfy the borrow checker.
+            let (middle_key, new_right) = 'handle_split: {
+                match &mut parent_node.children[idx] {
+                    NodeRefType::Stored(stored_idx) => {
+                        let node = data_store.get(*stored_idx)?.into();
+
+                        parent_node.children[idx] = node;
+                        continue 'handle_stored;
+                    }
+                    NodeRefType::Inner(child) => {
+                        match Self::insert_inner(data_store, Arc::make_mut(child), key, value)? {
+                            Insert_::SplitNode {
+                                middle_key,
+                                right_node,
+                            } => break 'handle_split (middle_key, InnerOuter::Inner(right_node)),
+                            r => return Ok(r),
+                        }
+                    }
+                    NodeRefType::Leaf(leaf) => {
+                        let leaf = Arc::make_mut(leaf);
+                        match leaf.keys.binary_search(&key) {
+                            Ok(idx) => {
+                                return Ok(Insert_::Replaced(mem::replace(
+                                    &mut leaf.children[idx],
+                                    value,
+                                )));
+                            }
+                            Err(idx) => {
+                                if !leaf.is_full() {
+                                    leaf.keys.insert(idx, key);
+                                    leaf.children.insert(idx, value);
+                                    return Ok(Insert_::Inserted);
+                                } else {
+                                    let (middle_key, new_right_leaf) =
+                                        leaf.insert_split(idx, key, value);
+
+                                    break 'handle_split (
+                                        middle_key,
+                                        InnerOuter::Outer(new_right_leaf),
+                                    );
+                                }
+                            }
+                        };
+                    }
+                }
+            };
+
+            // A split occurred
+            return Ok(parent_node.handle_split(idx, middle_key, new_right));
+        }
+    }
+
+    pub fn remove(&mut self, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
+        match &mut self.current_root {
+            None => Ok(None),
+            Some(NodeRefType::Stored(stored_idx)) => {
+                let node = self.data_store.get(*stored_idx)?.into();
+                self.current_root = Some(node);
+                self.remove(key)
+            }
+            Some(NodeRefType::Inner(node)) => {
+                let node = Arc::make_mut(node);
+                match Self::remove_inner(&self.data_store, node, key)? {
+                    Remove::NotPresent => Ok(None),
+                    Remove::Removed(value) => Ok(Some(value)),
+                    Remove::Underflow(value) => {
+                        if node.keys.is_empty() {
+                            debug_assert!(node.children.len() == 1);
+                            // handle_underflow removed the last key so the last child is the new root
+                            self.current_root = Some(node.children.pop().unwrap());
+                        }
+
+                        Ok(Some(value))
+                    }
+                }
+            }
+            Some(NodeRefType::Leaf(leaf)) => {
+                let leaf = Arc::make_mut(leaf);
+                match leaf.keys.binary_search(key) {
+                    Ok(idx) => {
+                        let value = leaf.children.remove(idx);
+                        leaf.keys.remove(idx);
+
+                        Ok(Some(value))
+                    }
+                    Err(_) => Ok(None),
+                }
+            }
+        }
+    }
+
+    pub fn remove_inner(
+        data_store: &S,
+        parent_node: &mut InnerNode<S::Key, S::Value>,
+        key: &S::Key,
+    ) -> Result<Remove<S>, S::Error> {
+        let idx = match parent_node.keys.binary_search(key) {
+            Ok(idx) | Err(idx) => cmp::min(idx, parent_node.children.len() - 1),
+        };
+
+        match &mut parent_node.children[idx] {
+            NodeRefType::Inner(child) => {
+                let child = Arc::make_mut(child);
+                match Self::remove_inner(data_store, child, key)? {
+                    Remove::NotPresent => Ok(Remove::NotPresent),
+                    Remove::Removed(value) => Ok(Remove::Removed(value)),
+                    Remove::Underflow(value) => {
+                        Self::handle_underflow(data_store, parent_node, idx, value)
+                    }
+                }
+            }
+            NodeRefType::Leaf(leaf) => {
+                let leaf = Arc::make_mut(leaf);
+                match leaf.keys.binary_search(key) {
+                    Ok(leaf_idx) => {
+                        let value = leaf.children.remove(leaf_idx);
+                        leaf.keys.remove(leaf_idx);
+
+                        if leaf.children.len() < NodeRep::<S::Key, S::Value>::min_children() {
+                            Self::handle_underflow(data_store, parent_node, idx, value)
+                        } else {
+                            Ok(Remove::Removed(value))
+                        }
+                    }
+                    Err(_) => Ok(Remove::NotPresent),
+                }
+            }
+            NodeRefType::Stored(stored_idx) => {
+                let node = data_store.get(*stored_idx)?.into();
+                parent_node.children[idx] = node;
+
+                Self::remove_inner(data_store, parent_node, key)
+            }
+        }
+    }
+
+    fn handle_underflow(
+        data_store: &S,
+        parent_node: &mut InnerNode<S::Key, S::Value>,
+        idx: usize,
+        value: S::Value,
+    ) -> Result<Remove<S>, S::Error> {
+        if let Err(()) = parent_node.merge_or_balance(idx) {
+            if idx == 0 {
+                let stored_idx = parent_node.children[1].stored().unwrap();
+                parent_node.children[1] = NodeRefType::from(data_store.get(stored_idx)?);
+            } else {
+                let hash_idx = parent_node.children[idx - 1].stored().unwrap();
+                parent_node.children[idx - 1] = NodeRefType::from(data_store.get(hash_idx)?);
+            }
+
+            // unwrap is fine because we just attached a stored sibling parent_node to the tree
+            parent_node.merge_or_balance(idx).unwrap()
+        };
+
+        if parent_node.is_to_small() {
+            Ok(Remove::Underflow(value))
+        } else {
+            Ok(Remove::Removed(value))
+        }
+    }
+
+    pub fn first_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        let mut node = match &self.current_root {
+            None => return Ok(None),
+            Some(NodeRefType::Inner(node)) => node,
+            Some(NodeRefType::Leaf(leaf)) => {
+                if leaf.keys.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Ok(Some((&leaf.keys[0], &leaf.children[0])));
+                }
+            }
+            Some(NodeRefType::Stored(stored_idx)) => {
+                return self.first_key_value_stored(*stored_idx);
+            }
+        };
+
+        loop {
+            match &node.children[0] {
+                NodeRefType::Inner(child) => {
+                    node = child;
+                }
+                NodeRefType::Leaf(leaf) => {
+                    return Ok(Some((&leaf.keys[0], &leaf.children[0])));
+                }
+                NodeRefType::Stored(stored_idx) => {
+                    return self.first_key_value_stored(*stored_idx);
+                }
+            }
+        }
+    }
+
+    fn first_key_value_stored(
+        &self,
+        mut stored_idx: Idx,
+    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        loop {
+            let node = self.data_store.get(stored_idx)?;
+
+            match node {
+                InnerOuter::Inner(node) => {
+                    stored_idx = node.children[0];
+                }
+                InnerOuter::Outer(leaf) => {
+                    return Ok(Some((&leaf.keys[0], &leaf.children[0])));
+                }
+            }
+        }
+    }
+
+    pub fn last_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        let mut node = match &self.current_root {
+            None => return Ok(None),
+            Some(NodeRefType::Inner(node)) => node,
+            Some(NodeRefType::Leaf(leaf)) => {
+                if leaf.keys.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Ok(Some((
+                        leaf.keys.last().unwrap(),
+                        leaf.children.last().unwrap(),
+                    )));
+                }
+            }
+            Some(NodeRefType::Stored(stored_idx)) => {
+                return self.last_key_value_stored(*stored_idx);
+            }
+        };
+
+        loop {
+            match &node.children[node.keys.len()] {
+                NodeRefType::Inner(child) => {
+                    node = child;
+                }
+                NodeRefType::Leaf(leaf) => {
+                    return Ok(Some((
+                        leaf.keys.last().unwrap(),
+                        leaf.children.last().unwrap(),
+                    )));
+                }
+                NodeRefType::Stored(stored_idx) => {
+                    return self.last_key_value_stored(*stored_idx);
+                }
+            }
+        }
+    }
+
+    fn last_key_value_stored(
+        &self,
+        mut stored_idx: Idx,
+    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+        loop {
+            let node = self.data_store.get(stored_idx)?;
+
+            match node {
+                InnerOuter::Inner(node) => {
+                    stored_idx = *node.children.last().unwrap();
+                }
+                InnerOuter::Outer(leaf) => {
+                    return Ok(Some((
+                        leaf.keys.last().unwrap(),
+                        leaf.children.last().unwrap(),
+                    )));
+                }
+            }
+        }
+    }
+}
+
+impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>>
+    MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
 {
     pub fn new_snapshot_builder_txn(root: NodeHash, db: Db) -> Self {
         debug_assert!(EMPTY_TREE_ROOT_HASH == NodeHash::default());
@@ -33,12 +550,12 @@ impl<
         if root == EMPTY_TREE_ROOT_HASH {
             Self {
                 data_store: SnapshotBuilder::new(root, db),
-                current_root: NodeRef::Null,
+                current_root: None,
             }
         } else {
             Self {
                 data_store: SnapshotBuilder::new(root, db),
-                current_root: NodeRef::Stored(0),
+                current_root: Some(NodeRefType::Stored(0)),
             }
         }
     }
@@ -46,7 +563,7 @@ impl<
     pub fn from_snapshot_builder_txn(snapshot_builder: SnapshotBuilder<K, V, Db>) -> Self {
         Self {
             data_store: snapshot_builder,
-            current_root: NodeRef::Stored(0),
+            current_root: Some(NodeRefType::Stored(0)),
         }
     }
 
@@ -73,11 +590,8 @@ impl<'s, S: Store + AsRef<Snapshot<S::Key, S::Value>>> MerkleBTreeTxn<&'s Verifi
     }
 }
 
-impl<
-        K: Clone + Debug + PortableHash + Ord,
-        V: Clone + Debug + PortableHash,
-        Db: DatabaseSet<K, V>,
-    > MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
+impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, V>>
+    MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
 {
     /// Write modified nodes to the database and return the root hash.
     /// Calling this method will write all modified nodes to the database.
@@ -88,18 +602,18 @@ impl<
     /// Caller must ensure that the hasher is reset before calling this method.
     #[inline]
     pub fn commit(&self, hasher: &mut impl PortableHasher<32>) -> Result<NodeHash, String> where {
-        let on_modified_leaf = &mut |hash: &NodeHash, leaf: &Leaf<K, V>| {
+        let on_modified_leaf = &mut |hash: &NodeHash, leaf: &LeafNode<K, V>| {
             self.data_store
                 .db
-                .set(hash, NodeOrLeaf::Leaf(leaf.clone()))
+                .set(hash, InnerOuter::Outer(leaf.clone()))
                 .map_err(|e| e.to_string())
         };
 
         let on_modified_branch =
             &mut |hash: &NodeHash,
-                  node: &Node<K, V>,
+                  node: &InnerNode<K, V>,
                   child_hashes: &ArrayVec<_, { BTREE_ORDER * 2 }>| {
-                let node = NodeOrLeaf::Node(NodeRep {
+                let node = InnerOuter::Inner(NodeRep {
                     keys: node.keys.clone(),
                     children: ArrayVec::from_iter(child_hashes.iter().cloned()),
                 });
@@ -114,615 +628,13 @@ impl<
     }
 }
 
-impl<S: Store> MerkleBTreeTxn<S> {
-    /// Calculate the root hash of the trie.
-    ///
-    /// Caller must ensure that the hasher is reset before calling this method.
-    #[inline]
-    pub fn calc_root_hash(
-        &self,
-        hasher: &mut impl PortableHasher<32>,
-    ) -> Result<NodeHash, S::Error> {
-        self.calc_root_hash_inner(hasher, &mut |_, _| Ok(()), &mut |_, _, _| Ok(()))
-    }
-
-    fn calc_root_hash_inner(
-        &self,
-        hasher: &mut impl PortableHasher<32>,
-        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<S::Key, S::Value>) -> Result<(), S::Error>,
-        on_modified_branch: &mut impl FnMut(
-            &NodeHash,
-            &Node<S::Key, S::Value>,
-            &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
-        ) -> Result<(), S::Error>,
-    ) -> Result<NodeHash, S::Error> {
-        match &self.current_root {
-            NodeRef::Null => Ok(EMPTY_TREE_ROOT_HASH),
-            node_ref => Self::calc_root_hash_node(
-                hasher,
-                &self.data_store,
-                node_ref,
-                on_modified_leaf,
-                on_modified_branch,
-            ),
-        }
-    }
-
-    #[inline]
-    fn calc_root_hash_node(
-        hasher: &mut impl PortableHasher<32>,
-        data_store: &S,
-        node_ref: &NodeRef<S::Key, S::Value>,
-        on_modified_leaf: &mut impl FnMut(&NodeHash, &Leaf<S::Key, S::Value>) -> Result<(), S::Error>,
-        on_modified_branch: &mut impl FnMut(
-            &NodeHash,
-            &Node<S::Key, S::Value>,
-            &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
-        ) -> Result<(), S::Error>,
-    ) -> Result<NodeHash, S::Error> {
-        match node_ref {
-            NodeRef::Node(node) => {
-                const MAX_CHILDREN: usize = BTREE_ORDER * 2;
-                debug_assert!(MAX_CHILDREN == Node::<S::Key, S::Value>::max_children());
-
-                // TODO: this a lot of stack space, consider using a heap allocated stack.
-                // The direct recursion is less of an issue than with the trie because the tree is much shallower.
-                // But the stack usage is much higher per node.
-                let mut child_hashes = ArrayVec::<NodeHash, MAX_CHILDREN>::new();
-
-                for child in &node.children {
-                    let child_hash = Self::calc_root_hash_node(
-                        hasher,
-                        data_store,
-                        child,
-                        on_modified_leaf,
-                        on_modified_branch,
-                    )?;
-                    child_hashes.push(child_hash);
-                }
-
-                node.portable_hash_iter(hasher, child_hashes.iter());
-                let hash = hasher.finalize_reset();
-
-                on_modified_branch(&hash, node, &child_hashes)?;
-
-                Ok(hash)
-            }
-            NodeRef::Leaf(leaf) => {
-                leaf.portable_hash(hasher);
-                let hash = hasher.finalize_reset();
-
-                on_modified_leaf(&hash, leaf)?;
-
-                Ok(hash)
-            }
-            NodeRef::Stored(hash_idx) => data_store.calc_subtree_hash(hasher, *hash_idx),
-            NodeRef::Null => {
-                unreachable!("Null nodes should never appear in the tree except as the root")
-            }
-        }
-    }
-
-    pub fn get(&self, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
-        let mut node_ref = &self.current_root;
-
-        loop {
-            match node_ref {
-                NodeRef::Node(node) => match node.keys.binary_search(key) {
-                    Ok(equal_key_idx) => node_ref = &node.children[equal_key_idx + 1],
-                    Err(idx) => node_ref = &node.children[idx],
-                },
-                NodeRef::Leaf(leaf) => {
-                    if &leaf.key == key {
-                        return Ok(Some(leaf.value.clone()));
-                    } else {
-                        return Ok(None);
-                    }
-                }
-                NodeRef::Stored(idx) => {
-                    return Self::get_stored(&self.data_store, *idx, key);
-                }
-                NodeRef::Null => return Ok(None),
-            }
-        }
-    }
-
-    fn get_stored(
-        data_store: &S,
-        mut stored_idx: Idx,
-        key: &S::Key,
-    ) -> Result<Option<S::Value>, S::Error> {
-        loop {
-            // TODO consider making Store::get return &Arc not Arc
-            let node = data_store.get(stored_idx)?;
-
-            match node {
-                NodeOrLeaf::Node(node) => {
-                    stored_idx = match node.keys.binary_search(key) {
-                        Ok(equal_key_idx) => node.children[equal_key_idx + 1],
-                        Err(idx) => node.children[idx],
-                    };
-                }
-                NodeOrLeaf::Leaf(leaf) => {
-                    if &leaf.key == key {
-                        return Ok(Some(leaf.value.clone()));
-                    } else {
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn insert(&mut self, key: S::Key, value: S::Value) -> Result<Option<S::Value>, S::Error> {
-        match Self::insert_inner(&self.data_store, &mut self.current_root, key, value)? {
-            Insert::Inserted => Ok(None),
-            Insert::Replaced(old_value) => Ok(Some(old_value)),
-            Insert::SplitNode {
-                right_node,
-                middle_key,
-            } => {
-                let new_root = Node {
-                    keys: ArrayVec::from_iter([middle_key]),
-                    children: ArrayVec::from_iter([
-                        self.current_root.clone(),
-                        NodeRef::Node(right_node),
-                    ]),
-                };
-                self.current_root = NodeRef::Node(Arc::new(new_root));
-                Ok(None)
-            }
-            Insert::SplitLeaf { new_leaf } => {
-                if new_leaf.key > self.current_root.leaf().unwrap().key {
-                    let new_root = Node {
-                        keys: ArrayVec::from_iter([new_leaf.key.clone()]),
-                        children: ArrayVec::from_iter([
-                            self.current_root.clone(),
-                            NodeRef::Leaf(new_leaf),
-                        ]),
-                    };
-                    self.current_root = NodeRef::Node(Arc::new(new_root));
-                } else {
-                    let new_root = Node {
-                        keys: ArrayVec::from_iter([self.current_root.leaf().unwrap().key.clone()]),
-                        children: ArrayVec::from_iter([
-                            NodeRef::Leaf(new_leaf),
-                            self.current_root.clone(),
-                        ]),
-                    };
-                    self.current_root = NodeRef::Node(Arc::new(new_root));
-                }
-
-                Ok(None)
-            }
-        }
-    }
-
-    fn insert_inner(
-        data_store: &S,
-        node: &mut NodeRef<S::Key, S::Value>,
-        key: S::Key,
-        value: S::Value,
-    ) -> Result<Insert<S>, S::Error> {
-        match node {
-            NodeRef::Stored(idx) => {
-                *node = NodeRef::from(data_store.get(*idx)?);
-
-                // TODO use loop and break
-                Self::insert_inner(data_store, node, key, value)
-            }
-            NodeRef::Node(node) => {
-                Node::assert_invariants(node);
-                let node = Arc::make_mut(node);
-
-                let idx = match node.keys.binary_search(&key) {
-                    Ok(equal_key_idx) => equal_key_idx + 1,
-                    Err(idx) => idx,
-                };
-
-                match Self::insert_inner(data_store, &mut node.children[idx], key, value)? {
-                    Insert::Inserted => Ok(Insert::Inserted),
-                    Insert::Replaced(v) => Ok(Insert::Replaced(v)),
-                    Insert::SplitNode {
-                        right_node,
-                        middle_key,
-                    } => {
-                        if node.is_full() {
-                            let mut new_right_node = Node {
-                                keys: node
-                                    .keys
-                                    .drain((Node::<S::Key, S::Value>::min_keys() + 1)..)
-                                    .collect(),
-                                children: node
-                                    .children
-                                    .drain(Node::<S::Key, S::Value>::min_children()..)
-                                    .collect(),
-                            };
-                            let new_middle_key = node.keys.pop().unwrap();
-
-                            if idx < Node::<S::Key, S::Value>::min_children() {
-                                node.keys.insert(idx, middle_key);
-                                node.children.insert(idx + 1, NodeRef::Node(right_node));
-                            } else {
-                                let adjusted_idx = idx - Node::<S::Key, S::Value>::min_children();
-                                new_right_node.keys.insert(adjusted_idx, middle_key);
-                                new_right_node
-                                    .children
-                                    .insert(adjusted_idx + 1, NodeRef::Node(right_node));
-                            }
-
-                            node.assert_invariants();
-                            Ok(Insert::SplitNode {
-                                middle_key: new_middle_key,
-                                right_node: Arc::new(new_right_node),
-                            })
-                        } else {
-                            node.keys.insert(idx, middle_key);
-                            node.children.insert(idx + 1, NodeRef::Node(right_node));
-
-                            Node::assert_invariants(node);
-                            Ok(Insert::Inserted)
-                        }
-                    }
-                    Insert::SplitLeaf { new_leaf } => {
-                        let old_key = &node
-                            .children
-                            .get(idx)
-                            .unwrap_or_else(|| node.children.last().unwrap())
-                            .leaf()
-                            .expect("SplitLeaf was returned, but existing child is not a leaf")
-                            .key;
-
-                        if node.is_full() {
-                            debug_assert!(node.keys.len() == Node::<S::Key, S::Value>::max_keys());
-                            debug_assert!(
-                                node.children.len() == Node::<S::Key, S::Value>::max_children()
-                            );
-
-                            let old_key = old_key.clone();
-
-                            let new_in_left_node = idx < Node::<S::Key, S::Value>::min_children();
-
-                            let mut right_node = Node {
-                                keys: node
-                                    .keys
-                                    .drain((Node::<S::Key, S::Value>::min_keys() + 1)..)
-                                    .collect(),
-                                children: node
-                                    .children
-                                    .drain(Node::<S::Key, S::Value>::min_children()..)
-                                    .collect(),
-                            };
-
-                            let middle_key = node.keys.pop().unwrap();
-
-                            if new_in_left_node {
-                                if new_leaf.key < old_key {
-                                    node.keys.insert(idx, old_key);
-                                    node.children.insert(idx, NodeRef::Leaf(new_leaf));
-                                } else {
-                                    debug_assert!(new_leaf.key > old_key);
-                                    node.keys.insert(idx, new_leaf.key.clone());
-                                    node.children.insert(idx + 1, NodeRef::Leaf(new_leaf));
-                                }
-                            } else if new_leaf.key < old_key {
-                                right_node.keys.insert(
-                                    idx - Node::<S::Key, S::Value>::min_children(),
-                                    old_key,
-                                );
-                                right_node.children.insert(
-                                    idx - Node::<S::Key, S::Value>::min_children(),
-                                    NodeRef::Leaf(new_leaf),
-                                );
-                            } else {
-                                debug_assert!(new_leaf.key > old_key);
-                                right_node.keys.insert(
-                                    idx - Node::<S::Key, S::Value>::min_children(),
-                                    new_leaf.key.clone(),
-                                );
-                                right_node.children.insert(
-                                    idx + 1 - Node::<S::Key, S::Value>::min_children(),
-                                    NodeRef::Leaf(new_leaf),
-                                );
-                            }
-
-                            Node::assert_invariants(node);
-                            Ok(Insert::SplitNode {
-                                middle_key,
-                                right_node: Arc::new(right_node),
-                            })
-                        } else {
-                            node.keys
-                                .insert(idx, cmp::max(&new_leaf.key, old_key).clone());
-
-                            debug_assert!(new_leaf.key != *old_key);
-                            let child_idx = if new_leaf.key < *old_key {
-                                idx
-                            } else {
-                                idx + 1
-                            };
-
-                            node.children.insert(child_idx, NodeRef::Leaf(new_leaf));
-                            Node::assert_invariants(node);
-                            Ok(Insert::Inserted)
-                        }
-                    }
-                }
-            }
-            NodeRef::Leaf(leaf) => match key.cmp(&leaf.key) {
-                Ordering::Equal => {
-                    let mut value = value;
-                    let leaf = Arc::make_mut(leaf);
-                    mem::swap(&mut leaf.value, &mut value);
-
-                    Ok(Insert::Replaced(value))
-                }
-                // split with the higher of the two values being the middle key
-                Ordering::Less => Ok(Insert::SplitLeaf {
-                    new_leaf: Arc::new(Leaf { key, value }),
-                }),
-                Ordering::Greater => Ok(Insert::SplitLeaf {
-                    new_leaf: Arc::new(Leaf { key, value }),
-                }),
-            },
-            NodeRef::Null => {
-                *node = NodeRef::Leaf(Arc::new(Leaf { key, value }));
-                Ok(Insert::Inserted)
-            }
-        }
-    }
-
-    pub fn remove(&mut self, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
-        match Self::remove_inner(&self.data_store, &mut self.current_root, key)? {
-            Remove::NotPresent => Ok(None),
-            Remove::Removed(value) => Ok(Some(value)),
-            Remove::Underflow(value) => {
-                match self.current_root {
-                    // remove_inner removed the single leaf node replacing it with null
-                    NodeRef::Null => Ok(Some(value)),
-                    NodeRef::Leaf(_) => {
-                        unreachable!("Removing a leaf replaces it with null")
-                    }
-                    NodeRef::Stored(_) => {
-                        unreachable!("Stored node would have been replaced with a node or leaf")
-                    }
-                    NodeRef::Node(ref mut node) => {
-                        if node.keys.is_empty() {
-                            debug_assert!(node.children.len() == 1);
-                            self.current_root = Arc::make_mut(node).children.pop().unwrap();
-                        }
-
-                        Ok(Some(value))
-                    }
-                }
-            }
-        }
-    }
-
-    fn remove_inner(
-        data_store: &S,
-        node: &mut NodeRef<S::Key, S::Value>,
-        key: &S::Key,
-    ) -> Result<Remove<S>, S::Error> {
-        match node {
-            NodeRef::Stored(idx) => {
-                if Self::get_stored(data_store, *idx, key)?.is_none() {
-                    return Ok(Remove::NotPresent);
-                }
-                *node = NodeRef::from(data_store.get(*idx)?);
-
-                // TODO use loop and break
-                Self::remove_inner(data_store, node, key)
-            }
-            NodeRef::Node(node) => {
-                Node::assert_invariants(node);
-                let node = Arc::make_mut(node);
-
-                let idx = match node.keys.binary_search(key) {
-                    Ok(equal_key_idx) => equal_key_idx + 1,
-                    Err(idx) => idx,
-                };
-
-                match Self::remove_inner(data_store, &mut node.children[idx], key)? {
-                    Remove::NotPresent => Ok(Remove::NotPresent),
-                    Remove::Removed(value) => Ok(Remove::Removed(value)),
-                    Remove::Underflow(value) => {
-                        Self::handle_underflow(data_store, node, idx, value)
-                    }
-                }
-            }
-            NodeRef::Leaf(leaf) => {
-                if &leaf.key == key {
-                    // TODO maybe return whole leaf or do somthing more advanced to enforce good usage
-                    let value = leaf.value.clone();
-                    *node = NodeRef::Null;
-                    Ok(Remove::Underflow(value))
-                } else {
-                    Ok(Remove::NotPresent)
-                }
-            }
-            NodeRef::Null => Ok(Remove::NotPresent),
-        }
-    }
-
-    fn handle_underflow(
-        data_store: &S,
-        node: &mut Node<S::Key, S::Value>,
-        idx: usize,
-        value: S::Value,
-    ) -> Result<Remove<S>, S::Error> {
-        match node.children[idx] {
-            NodeRef::Node(_) => {
-                if let Err(()) = node.merge_or_balance(idx) {
-                    if idx == 0 {
-                        let hash_idx = node.children[1].stored().unwrap();
-                        node.children[1] = NodeRef::from(data_store.get(hash_idx)?);
-                    } else {
-                        let hash_idx = node.children[idx - 1].stored().unwrap();
-                        node.children[idx - 1] = NodeRef::from(data_store.get(hash_idx)?);
-                    }
-
-                    // We just added a sibling node to the tree
-                    node.merge_or_balance(idx).unwrap()
-                };
-
-                if node.is_to_small() {
-                    Ok(Remove::Underflow(value))
-                } else {
-                    Ok(Remove::Removed(value))
-                }
-            }
-            // A leaf was just removed leaving null
-            NodeRef::Null => {
-                if idx == 0 {
-                    node.keys.remove(idx);
-                } else {
-                    node.keys.remove(idx - 1);
-                }
-
-                node.children.remove(idx);
-
-                if node.keys.len() < Node::<S::Key, S::Value>::min_keys() {
-                    Ok(Remove::Underflow(value))
-                } else {
-                    Ok(Remove::Removed(value))
-                }
-            }
-            _ => {
-                unreachable!("Underflow is only returned from visiting a node or leaf")
-            }
-        }
-    }
-
-    pub fn first_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
-        let mut node = match &self.current_root {
-            NodeRef::Node(node) => node,
-            NodeRef::Leaf(leaf) => return Ok(Some((&leaf.key, &leaf.value))),
-            NodeRef::Stored(idx) => return self.first_key_value_stored(*idx),
-            NodeRef::Null => return Ok(None),
-        };
-
-        loop {
-            match &node.children.first().unwrap() {
-                NodeRef::Node(child) => {
-                    node = child;
-                }
-                NodeRef::Leaf(leaf) => {
-                    return Ok(Some((&leaf.key, &leaf.value)));
-                }
-                NodeRef::Stored(idx) => return self.first_key_value_stored(*idx),
-                NodeRef::Null => {
-                    return Ok(None);
-                }
-            }
-        }
-    }
-
-    fn first_key_value_stored(
-        &self,
-        mut stored_idx: Idx,
-    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
-        loop {
-            let node_or_leaf = self.data_store.get(stored_idx)?;
-            match node_or_leaf {
-                NodeOrLeaf::Node(node) => {
-                    stored_idx = node.children[0];
-                }
-                NodeOrLeaf::Leaf(leaf) => {
-                    return Ok(Some((&leaf.key, &leaf.value)));
-                }
-            }
-        }
-    }
-
-    pub fn last_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
-        let mut node = match &self.current_root {
-            NodeRef::Node(node) => node,
-            NodeRef::Leaf(leaf) => return Ok(Some((&leaf.key, &leaf.value))),
-            NodeRef::Stored(idx) => return self.last_key_value_stored(*idx),
-            NodeRef::Null => return Ok(None),
-        };
-
-        loop {
-            match &node.children.last().unwrap() {
-                NodeRef::Node(child) => {
-                    node = child;
-                }
-                NodeRef::Leaf(leaf) => {
-                    return Ok(Some((&leaf.key, &leaf.value)));
-                }
-                NodeRef::Stored(idx) => return self.last_key_value_stored(*idx),
-                NodeRef::Null => {
-                    return Ok(None);
-                }
-            }
-        }
-    }
-
-    fn last_key_value_stored(
-        &self,
-        mut stored_idx: Idx,
-    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
-        loop {
-            let node_or_leaf = self.data_store.get(stored_idx)?;
-            match node_or_leaf {
-                NodeOrLeaf::Node(node) => {
-                    stored_idx = *node.children.last().unwrap();
-                }
-                NodeOrLeaf::Leaf(leaf) => {
-                    return Ok(Some((&leaf.key, &leaf.value)));
-                }
-            }
-        }
-    }
-
-    /// Prints the whole tree in a pretty format.
-    pub fn pretty_print(&self) {
-        Self::pretty_print_node(&self.data_store, &self.current_root, 0).unwrap();
-    }
-
-    fn pretty_print_node(
-        data_store: &S,
-        node_ref: &NodeRef<S::Key, S::Value>,
-        indent: usize,
-    ) -> Result<(), S::Error> {
-        let indent_str = "  ".repeat(indent);
-        match node_ref {
-            NodeRef::Node(node) => {
-                println!("{}Node(keys: {:?})", indent_str, node.keys);
-                for child in &node.children {
-                    Self::pretty_print_node(data_store, child, indent + 1)?;
-                }
-            }
-            NodeRef::Leaf(leaf) => {
-                println!(
-                    "{}Leaf(key: {:?}, value: {:?})",
-                    indent_str, leaf.key, leaf.value
-                );
-            }
-            NodeRef::Stored(idx) => {
-                let node_or_leaf = data_store.get(*idx)?;
-                let node_ref = NodeRef::from(node_or_leaf);
-                Self::pretty_print_node(data_store, &node_ref, indent)?;
-            }
-            NodeRef::Null => {
-                println!("{}Null", indent_str);
-            }
-        }
-        Ok(())
-    }
-}
-
-enum Insert<S: Store> {
+pub(crate) enum Insert_<K, V> {
     Inserted,
-    Replaced(S::Value),
+    Replaced(V),
     /// The key should be the right node's first key.
     SplitNode {
-        middle_key: S::Key,
-        right_node: Arc<Node<S::Key, S::Value>>,
-    },
-    SplitLeaf {
-        new_leaf: Arc<Leaf<S::Key, S::Value>>,
+        middle_key: K,
+        right_node: Arc<InnerNode<K, V>>,
     },
 }
 
@@ -731,26 +643,6 @@ pub enum Remove<S: Store> {
     Removed(S::Value),
     /// Removing caused a node to be smaller than the minimum size.
     Underflow(S::Value),
-}
-
-impl<S: Store> Debug for Insert<S> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Insert::Inserted => write!(f, "Inserted"),
-            Insert::Replaced(v) => write!(f, "Replaced({:?})", v),
-            Insert::SplitNode {
-                right_node,
-                middle_key,
-            } => {
-                write!(
-                    f,
-                    "SplitNode {{ right_node: {:?}, middle_key: {:?} }}",
-                    right_node, middle_key
-                )
-            }
-            Insert::SplitLeaf { new_leaf } => write!(f, "SplitLeaf {{ new_leaf: {:?} }}", new_leaf),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -785,7 +677,7 @@ mod test {
                         k, v, res_txn, res_std);
                 }
                 Op::Get(k) => {
-                    let res_txn = txn_btree.get(&k).unwrap();
+                    let res_txn = txn_btree.get(&k).unwrap().cloned();
                     let res_std = std_btree.get(&k).cloned();
                     assert_eq!(res_txn, res_std,
                         "get failed for key: {}, merkle btree returned {:?}, btreemap returned {:?}",
@@ -858,6 +750,12 @@ mod test {
             Op::Insert(0, 0),
             Op::Insert(0, 0), // Duplicate insert
         ];
+        run_operations(operations);
+    }
+
+    #[test]
+    fn test_hardcoded_5_insert_insert() {
+        let operations = vec![Op::Insert(0, 0), Op::Insert(1, 0), Op::Insert(1, 0)];
         run_operations(operations);
     }
 
@@ -1022,6 +920,65 @@ mod test {
             Op::GetLastKeyValue,
             Op::Delete(100),
             Op::GetFirstKeyValue,
+            Op::GetLastKeyValue,
+        ];
+        run_operations(operations);
+    }
+
+    #[test]
+    fn test_hardcoded_14_insert_delete() {
+        let operations = vec![
+            Op::Insert(4182, 0),
+            Op::Insert(0, 0),
+            Op::Insert(1, 0),
+            Op::Insert(0, 0),
+            Op::Insert(2197, 0),
+            Op::Insert(0, 0),
+            Op::Insert(2, 0),
+            Op::Insert(2198, 0),
+            Op::Insert(4126, 0),
+            Op::Insert(4126, 0),
+            Op::Insert(4126, 0),
+            Op::Insert(4126, 0),
+            Op::Insert(4127, 0),
+            Op::Insert(3953, 0),
+            Op::Insert(3952, 0),
+            Op::Insert(3700, 0),
+            Op::Insert(3947, 0),
+            Op::Insert(2199, 0),
+            Op::Delete(3947),
+            Op::Delete(3952),
+        ];
+        run_operations(operations);
+    }
+
+    #[test]
+    fn test_hardcoded_15_insert_delete_first() {
+        let operations = vec![
+            Op::Insert(23, 0),
+            Op::Insert(8, 0),
+            Op::Insert(24, 0),
+            Op::Insert(25, 0),
+            Op::Insert(26, 0),
+            Op::Delete(8),
+            Op::Delete(23),
+            Op::GetFirstKeyValue,
+        ];
+        run_operations(operations);
+    }
+
+    #[test]
+    fn test_hardcoded_16_insert_delete_last_key() {
+        let operations = vec![
+            Op::Insert(3, 0),
+            Op::Insert(9952, 0),
+            Op::Insert(9970, 0),
+            Op::Insert(0, 0),
+            Op::Insert(9982, 0),
+            Op::Insert(4, 0),
+            Op::Insert(5, 0),
+            Op::Delete(9982),
+            Op::Delete(9970),
             Op::GetLastKeyValue,
         ];
         run_operations(operations);

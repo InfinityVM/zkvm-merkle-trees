@@ -1,16 +1,14 @@
-use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
 use core::cell::RefCell;
-use core::fmt::Debug;
 
 use imbl::Vector;
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::node::{NodeRef, NodeRep};
+use crate::node::{LeafNode, NodeRefType, NodeRep};
 use crate::{
     db::DatabaseGet,
     node::{
-        Leaf, NodeHash, NodeOrLeaf, NodeOrLeafSnapshotArc, NodeOrLeafSnapshotRef, NodeSnapshot,
+        InnerNodeSnapshot, InnerOuter, InnerOuterSnapshotArc, InnerOuterSnapshotRef, NodeHash,
         EMPTY_TREE_ROOT_HASH,
     },
     store::{Idx, Store},
@@ -115,7 +113,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> VerifiedSnapshot<S> {
     }
 
     #[inline]
-    pub(crate) fn root_node_ref(&self) -> NodeRef<S::Key, S::Value> {
+    pub(crate) fn root_node_ref(&self) -> Option<NodeRefType<S::Key, S::Value>> {
         let snapshot = self.snapshot.as_ref();
         snapshot
             .root_node_ref()
@@ -157,7 +155,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
     }
 
     #[inline]
-    fn get(&self, idx: Idx) -> Result<NodeOrLeafSnapshotRef<Self::Key, Self::Value>, Self::Error> {
+    fn get(&self, idx: Idx) -> Result<InnerOuterSnapshotRef<Self::Key, Self::Value>, Self::Error> {
         let snapshot = self.snapshot.as_ref();
 
         let idx = idx as usize;
@@ -165,9 +163,9 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
         let unvisited_offset = leaf_offset + snapshot.leaves.len();
 
         if let Some(node) = snapshot.branches.get(idx) {
-            Ok(NodeOrLeafSnapshotRef::Node(node))
+            Ok(InnerOuterSnapshotRef::Inner(node))
         } else if let Some(leaf) = snapshot.leaves.get(idx - leaf_offset) {
-            Ok(NodeOrLeafSnapshotRef::Leaf(leaf))
+            Ok(InnerOuterSnapshotRef::Outer(leaf))
         } else if snapshot
             .unvisited_nodes
             .get(idx - unvisited_offset)
@@ -197,8 +195,8 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot<K, V> {
     /// The last branch is the root of the trie if it exists.
-    branches: Box<[NodeSnapshot<K>]>,
-    leaves: Box<[Leaf<K, V>]>,
+    branches: Box<[InnerNodeSnapshot<K>]>,
+    leaves: Box<[LeafNode<K, V>]>,
 
     // we only store the hashes of the nodes that have not been visited.
     unvisited_nodes: Box<[NodeHash]>,
@@ -207,15 +205,15 @@ pub struct Snapshot<K, V> {
 impl<K, V> Snapshot<K, V> {
     /// Checks that the number of branches, leaves, and unvisited nodes could be a valid snapshot.
     /// This does not check that the snapshot represents a valid merkle tree.
-    fn root_node_ref(&self) -> Result<NodeRef<K, V>, &'static str> {
+    fn root_node_ref(&self) -> Result<Option<NodeRefType<K, V>>, &'static str> {
         match (
             self.branches.as_ref(),
             self.leaves.as_ref(),
             self.unvisited_nodes.as_ref(),
         ) {
-            ([], [], []) => Ok(NodeRef::Null),
-            ([.., _], _, _) => Ok(NodeRef::Stored(self.branches.len() as Idx - 1)),
-            ([], [_], []) | ([], [], [_]) => Ok(NodeRef::Stored(0)),
+            ([], [], []) => Ok(None),
+            ([.., _], _, _) => Ok(Some(NodeRefType::Stored(self.branches.len() as Idx - 1))),
+            ([], [_], []) | ([], [], [_]) => Ok(Some(NodeRefType::Stored(0))),
             _ => Err("ill-formed snapshot"),
         }
     }
@@ -227,9 +225,7 @@ impl<K, V> AsRef<Snapshot<K, V>> for Snapshot<K, V> {
     }
 }
 
-impl<K: Clone + Ord + PortableHash + Debug, V: Clone + PortableHash + Debug> Store
-    for Snapshot<K, V>
-{
+impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<K, V> {
     type Error = String;
     type Key = K;
     type Value = V;
@@ -246,12 +242,12 @@ impl<K: Clone + Ord + PortableHash + Debug, V: Clone + PortableHash + Debug> Sto
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<NodeOrLeafSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         let idx = hash_idx as usize;
         if let Some(node) = self.branches.get(idx) {
-            Ok(NodeOrLeafSnapshotRef::Node(node))
+            Ok(InnerOuterSnapshotRef::Inner(node))
         } else if let Some(leaf) = self.leaves.get(idx - self.branches.len()) {
-            Ok(NodeOrLeafSnapshotRef::Leaf(leaf))
+            Ok(InnerOuterSnapshotRef::Outer(leaf))
         } else if self
             .unvisited_nodes
             .get(idx - self.branches.len())
@@ -280,7 +276,7 @@ pub struct SnapshotBuilder<K: Ord + Clone + PortableHash, V: Clone + PortableHas
 
 #[derive(Clone)]
 pub struct SnapshotBuilderInner<K: Ord + Clone + PortableHash, V: Clone + PortableHash> {
-    nodes: Vector<(NodeHash, Option<NodeOrLeafSnapshotArc<K, V>>)>,
+    nodes: Vector<(NodeHash, Option<InnerOuterSnapshotArc<K, V>>)>,
 }
 
 impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder<K, V, Db> {
@@ -338,11 +334,8 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder
     }
 }
 
-impl<
-        K: Ord + Clone + PortableHash + Debug,
-        V: Clone + PortableHash + Debug,
-        Db: DatabaseGet<K, V>,
-    > Store for SnapshotBuilder<K, V, Db>
+impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>> Store
+    for SnapshotBuilder<K, V, Db>
 {
     type Error = String;
     type Key = K;
@@ -368,7 +361,7 @@ impl<
         Ok(*node_hash)
     }
 
-    fn get(&self, hash_idx: Idx) -> Result<NodeOrLeafSnapshotRef<K, V>, Self::Error> {
+    fn get(&self, hash_idx: Idx) -> Result<InnerOuterSnapshotRef<K, V>, Self::Error> {
         let mut inner = self.inner.borrow_mut();
         let (hash, unread) = inner
             .nodes
@@ -379,7 +372,7 @@ impl<
         if unread {
             let newly_read = self.db.get(&hash).map_err(|e| e.to_string())?;
             match newly_read {
-                NodeOrLeaf::Node(node) => {
+                InnerOuter::Inner(node) => {
                     let children = node
                         .children
                         .iter()
@@ -391,14 +384,14 @@ impl<
                         .collect();
 
                     inner.nodes[hash_idx as usize].1 =
-                        Some(NodeOrLeafSnapshotArc::Node(Arc::new(NodeRep {
+                        Some(InnerOuterSnapshotArc::Inner(Arc::new(NodeRep {
                             keys: node.keys,
                             children,
                         })));
                 }
-                NodeOrLeaf::Leaf(leaf) => {
+                InnerOuter::Outer(leaf) => {
                     inner.nodes[hash_idx as usize].1 =
-                        Some(NodeOrLeafSnapshotArc::Leaf(Arc::new(leaf.clone())));
+                        Some(InnerOuterSnapshotArc::Outer(Arc::new(leaf.clone())));
                 }
             }
         }
@@ -411,11 +404,11 @@ impl<
         // Hence, the reference to the Arc<Node> or Arc<Leaf> is valid for the lifetime of the SnapshotBuilder.
         unsafe {
             match node_or_leaf {
-                NodeOrLeaf::Node(node) => {
-                    Ok(NodeOrLeafSnapshotRef::Node(&*(node.as_ref() as *const _)))
+                InnerOuter::Inner(node) => {
+                    Ok(InnerOuterSnapshotRef::Inner(&*(node.as_ref() as *const _)))
                 }
-                NodeOrLeaf::Leaf(leaf) => {
-                    Ok(NodeOrLeafSnapshotRef::Leaf(&*(leaf.as_ref() as *const _)))
+                InnerOuter::Outer(leaf) => {
+                    Ok(InnerOuterSnapshotRef::Outer(&*(leaf.as_ref() as *const _)))
                 }
             }
         }
@@ -423,7 +416,7 @@ impl<
 }
 
 struct SnapshotBuilderFold<K, V> {
-    nodes: Vector<(NodeHash, Option<NodeOrLeafSnapshotArc<K, V>>)>,
+    nodes: Vector<(NodeHash, Option<InnerOuterSnapshotArc<K, V>>)>,
     /// The count of branches that will be in the snapshot
     branch_count: u32,
     /// The count of leaves that will be in the snapshot
@@ -431,21 +424,21 @@ struct SnapshotBuilderFold<K, V> {
     /// The count of unvisited nodes that will be in the snapshot
     unvisited_count: u32,
     branches: Vec<NodeRep<K, Idx>>,
-    leaves: Vec<Leaf<K, V>>,
+    leaves: Vec<LeafNode<K, V>>,
     unvisited_nodes: Vec<NodeHash>,
 }
 
 impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
     #[inline]
-    fn new(nodes: Vector<(NodeHash, Option<NodeOrLeafSnapshotArc<K, V>>)>) -> Self {
+    fn new(nodes: Vector<(NodeHash, Option<InnerOuterSnapshotArc<K, V>>)>) -> Self {
         let mut branch_count = 0;
         let mut leaf_count = 0;
         let mut unvisited_count = 0;
 
         for (_, node) in nodes.iter() {
             match node {
-                Some(NodeOrLeaf::Node(_)) => branch_count += 1,
-                Some(NodeOrLeaf::Leaf(_)) => leaf_count += 1,
+                Some(InnerOuter::Inner(_)) => branch_count += 1,
+                Some(InnerOuter::Outer(_)) => leaf_count += 1,
                 None => unvisited_count += 1,
             }
         }
@@ -469,7 +462,7 @@ impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
     }
 
     #[inline]
-    fn push_leaf(&mut self, leaf: Leaf<K, V>) -> Idx {
+    fn push_leaf(&mut self, leaf: LeafNode<K, V>) -> Idx {
         let idx = self.leaves.len() as Idx;
         self.leaves.push(leaf);
         self.branch_count + idx
@@ -486,7 +479,7 @@ impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
     fn fold(&mut self, node_idx: Idx) -> Idx {
         // TODO remove this clone
         match self.nodes[node_idx as usize].clone() {
-            (_, Some(NodeOrLeaf::Node(branch))) => {
+            (_, Some(InnerOuter::Inner(branch))) => {
                 // TODO consider using stacker to avoid stack overflow
                 let keys = branch.keys.clone();
 
@@ -500,7 +493,7 @@ impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
             }
             // We could remove the clone by taking ownership of the SnapshotBuilder.
             // However, given this only runs on the server we can afford the clone.
-            (_, Some(NodeOrLeaf::Leaf(leaf))) => self.push_leaf(leaf.as_ref().clone()),
+            (_, Some(InnerOuter::Outer(leaf))) => self.push_leaf(leaf.as_ref().clone()),
             (hash, None) => self.push_unvisited(hash),
         }
     }

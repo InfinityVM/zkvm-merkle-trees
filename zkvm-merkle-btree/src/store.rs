@@ -1,16 +1,16 @@
+use alloc::{rc::Rc, sync::Arc};
 use core::fmt::{Debug, Display};
-use std::{rc::Rc, sync::Arc};
 
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::node::{NodeHash, NodeOrLeafSnapshotRef};
+use crate::node::{InnerOuterSnapshotRef, NodeHash};
 
 pub type Idx = u32;
 
 pub trait Store {
     type Error: Display + Debug;
-    type Key: Ord + Clone + PortableHash + Debug;
-    type Value: Clone + PortableHash + Debug;
+    type Key: Ord + Clone + PortableHash;
+    type Value: Clone + PortableHash;
 
     fn calc_subtree_hash(
         &self,
@@ -22,7 +22,7 @@ pub trait Store {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<NodeOrLeafSnapshotRef<'_, Self::Key, Self::Value>, Self::Error>;
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error>;
 }
 
 impl<S: Store> Store for &S {
@@ -43,7 +43,7 @@ impl<S: Store> Store for &S {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<NodeOrLeafSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
     }
 }
@@ -66,7 +66,7 @@ impl<S: Store> Store for Rc<S> {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<NodeOrLeafSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
     }
 }
@@ -89,7 +89,7 @@ impl<S: Store> Store for Arc<S> {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<NodeOrLeafSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
     }
 }
