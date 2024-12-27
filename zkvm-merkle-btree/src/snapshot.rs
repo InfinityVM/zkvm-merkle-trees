@@ -480,7 +480,6 @@ impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
         // TODO remove this clone
         match self.nodes[node_idx as usize].clone() {
             (_, Some(InnerOuter::Inner(branch))) => {
-                // TODO consider using stacker to avoid stack overflow
                 let keys = branch.keys.clone();
 
                 let children = branch
