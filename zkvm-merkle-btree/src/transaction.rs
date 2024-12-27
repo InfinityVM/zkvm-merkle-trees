@@ -46,8 +46,13 @@ impl<S: Store> MerkleBTreeTxn<S> {
         ) -> Result<(), S::Error>,
     ) -> Result<NodeHash, S::Error> {
         match &self.current_root {
+            // We allow two versions of an empty tree as an optimization to reuse the allocated memory.
             None => Ok(EMPTY_TREE_ROOT_HASH),
+            Some(NodeRefType::Leaf(leaf)) if leaf.keys.is_empty() => Ok(EMPTY_TREE_ROOT_HASH),
+
             Some(node_ref) => Self::calc_root_hash_node(
+                #[cfg(debug_assertions)]
+                0,
                 hasher,
                 &self.data_store,
                 node_ref,
@@ -59,6 +64,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
 
     #[inline]
     fn calc_root_hash_node(
+        #[cfg(debug_assertions)] depth: usize,
         hasher: &mut impl PortableHasher<32>,
         data_store: &S,
         node_ref: &NodeRefType<S::Key, S::Value>,
@@ -76,14 +82,22 @@ impl<S: Store> MerkleBTreeTxn<S> {
             NodeRefType::Inner(node) => {
                 const MAX_CHILDREN: usize = BTREE_ORDER * 2;
                 debug_assert!(MAX_CHILDREN == InnerNode::<S::Key, S::Value>::max_children());
+                #[cfg(debug_assertions)]
+                {
+                    node.assert_inner_invariants();
+                    debug_assert!(node.keys.len() == node.children.len() - 1);
+                    debug_assert!(
+                        depth == 0
+                            || node.children.len() >= InnerNode::<S::Key, S::Value>::min_children()
+                    );
+                }
 
-                // TODO: this a lot of stack space, consider using a heap allocated stack.
-                // The direct recursion is less of an issue than with the trie because the tree is much shallower.
-                // But the stack usage is much higher per node.
                 let mut child_hashes = ArrayVec::<NodeHash, MAX_CHILDREN>::new();
 
                 for child in &node.children {
                     let child_hash = Self::calc_root_hash_node(
+                        #[cfg(debug_assertions)]
+                        (depth + 1),
                         hasher,
                         data_store,
                         child,
@@ -101,6 +115,16 @@ impl<S: Store> MerkleBTreeTxn<S> {
                 Ok(hash)
             }
             NodeRefType::Leaf(leaf) => {
+                #[cfg(debug_assertions)]
+                {
+                    leaf.assert_leaf_invariants();
+                    debug_assert!(leaf.keys.len() == leaf.children.len());
+                    debug_assert!(
+                        depth == 0
+                            || leaf.children.len() >= NodeRep::<S::Key, S::Value>::min_children()
+                    );
+                }
+
                 leaf.portable_hash(hasher);
                 let hash = hasher.finalize_reset();
 

@@ -237,26 +237,26 @@ fn end_to_end_ops(batches: Vec<Vec<Operation>>) {
     }
 
     // After all batches are applied, the B-tree and the btree should be in sync
-    // let txn = MerkleBTreeTxn::new_snapshot_builder_txn(prior_root_hash, db);
+    let txn = MerkleBTreeTxn::new_snapshot_builder_txn(prior_root_hash, db);
 
-    // // Check that the B-tree and the btree are in sync
-    // for (k, v) in btree.iter() {
-    //     let ret_v = txn.get(k).unwrap().unwrap();
-    //     assert_eq!(v, &ret_v);
-    // }
+    // Check that the B-tree and the btree are in sync
+    for (k, v) in btree.iter() {
+        let ret_v = txn.get(k).unwrap().unwrap();
+        assert_eq!(v, ret_v);
+    }
 
-    // // Verify first and last key/value pairs match
-    // if let Some((first_k, first_v)) = btree.first_key_value() {
-    //     let (ret_k, ret_v) = txn.first_key_value().unwrap().unwrap();
-    //     assert_eq!(first_k, ret_k);
-    //     assert_eq!(first_v, ret_v);
-    // }
+    // Verify first and last key/value pairs match
+    if let Some((first_k, first_v)) = btree.first_key_value() {
+        let (ret_k, ret_v) = txn.first_key_value().unwrap().unwrap();
+        assert_eq!(first_k, ret_k);
+        assert_eq!(first_v, ret_v);
+    }
 
-    // if let Some((last_k, last_v)) = btree.last_key_value() {
-    //     let (ret_k, ret_v) = txn.last_key_value().unwrap().unwrap();
-    //     assert_eq!(last_k, ret_k);
-    //     assert_eq!(last_v, ret_v);
-    // }
+    if let Some((last_k, last_v)) = btree.last_key_value() {
+        let (ret_k, ret_v) = txn.last_key_value().unwrap().unwrap();
+        assert_eq!(last_k, ret_k);
+        assert_eq!(last_v, ret_v);
+    }
 }
 
 #[test]
@@ -380,6 +380,15 @@ fn test_minimal_failing_input_2() {
         ],
         vec![Operation::Delete(0)],
         vec![Operation::Delete(1), Operation::Insert(0, 0)],
+    ];
+    end_to_end_ops(batches);
+}
+
+#[test]
+fn test_minimal_failing_input_3() {
+    let batches = vec![
+        vec![Operation::Insert(2, 0), Operation::Delete(2)],
+        vec![Operation::GetFirstKeyValue],
     ];
     end_to_end_ops(batches);
 }

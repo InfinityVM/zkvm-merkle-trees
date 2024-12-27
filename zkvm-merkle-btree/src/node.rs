@@ -439,7 +439,6 @@ impl<K: Clone + Ord, V> LeafNode<K, V> {
     pub fn assert_leaf_invariants(&self) {
         self.assert_keys_sorted();
         assert_eq!(self.keys.len(), self.children.len());
-        // assert!(self.keys.len() >= Self::min_keys());
     }
 }
 
