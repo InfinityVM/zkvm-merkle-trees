@@ -715,6 +715,95 @@ impl<S: Store> Transaction<S> {
             }
         }
     }
+
+    #[inline]
+    pub fn print_modified_tree(&self)
+    where
+        S::Value: core::fmt::Debug,
+    {
+        match &self.current_root {
+            TrieRoot::Empty => println!("Empty"),
+            TrieRoot::Node(node) => Self::print_modified_node(node, 0),
+        }
+    }
+
+    fn print_modified_node(node: &NodeRef<S::Value>, depth: usize)
+    where
+        S::Value: core::fmt::Debug,
+    {
+        let indent = "  ".repeat(depth);
+        match node {
+            NodeRef::ModBranch(branch) => {
+                println!("{}Branch {{", indent);
+                println!("{}  mask:", indent);
+                println!(
+                    "{}      word_idx: {}, bit_idx: {}, relative_bit_idx: {}",
+                    indent,
+                    branch.mask.word_idx(),
+                    branch.mask.bit_idx,
+                    branch.mask.relative_bit_idx()
+                );
+                println!(
+                    "{}      left_prefix: {:032b}",
+                    indent, branch.mask.left_prefix
+                );
+                println!(
+                    "{}      right_prefix: {:032b}",
+                    indent,
+                    branch.mask.right_prefix()
+                );
+                println!(
+                    "{}      prefix_mask: {:032b}",
+                    indent,
+                    branch.mask.prefix_mask()
+                );
+                println!(
+                    "{}      discriminant_bit_mask: {:032b}",
+                    indent,
+                    branch.mask.discriminant_bit_mask()
+                );
+                println!(
+                    "{}      prefix_discriminant_mask: {:032b}",
+                    indent,
+                    branch.mask.prefix_discriminant_mask()
+                );
+                println!(
+                    "{}      trailing_bits_mask: {:032b}",
+                    indent,
+                    branch.mask.trailing_bits_mask()
+                );
+                println!("{}  prior_word: {:032b},", indent, branch.prior_word);
+                println!(
+                    "{}  prefix: [{}],",
+                    indent,
+                    branch
+                        .prefix
+                        .iter()
+                        .map(|w| format!("{:032b}", w))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                println!("{}  left: ", indent);
+                Self::print_modified_node(&branch.left, depth + 2);
+                println!("{}  right: ", indent);
+                Self::print_modified_node(&branch.right, depth + 2);
+                println!("{}}}", indent);
+            }
+            NodeRef::ModLeaf(leaf) => {
+                let key_str: String = leaf.key_hash.0.iter().fold(String::new(), |mut s, word| {
+                    s.push_str(&format!("{:032b} ", word));
+                    s
+                });
+                println!(
+                    "{}Leaf {{ key: 0x{}, value: {:?} }}",
+                    indent, key_str, leaf.value
+                );
+            }
+            NodeRef::Stored(_) => {
+                println!("{}..stored..", indent);
+            }
+        }
+    }
 }
 
 impl<Db: DatabaseGet<V>, V: PortableHash + Clone> Transaction<SnapshotBuilder<Db, V>> {

@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use std::collections::HashMap;
+use trie_test_utils::arb_key_hash;
 
 use sha2::{Digest, Sha256};
 
@@ -33,12 +34,6 @@ fn insert_get_u64_round_trip() {
     for (key, value) in hashmap.iter() {
         let ret_val = txn.get(key).unwrap().unwrap();
         assert_eq!(ret_val, value);
-    }
-}
-
-prop_compose! {
-    fn arb_key_hash()(data in any::<[u8; 32]>()) -> KeyHash {
-        KeyHash::from(&data)
     }
 }
 

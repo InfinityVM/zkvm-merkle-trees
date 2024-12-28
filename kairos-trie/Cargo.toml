@@ -17,6 +17,7 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 
 
 [dev-dependencies]
+trie-test-utils = { path = "./trie-test-utils" }
 sha2 = "0.10"
 proptest-derive = { version = "0.5" }
 proptest = { version = "1" }

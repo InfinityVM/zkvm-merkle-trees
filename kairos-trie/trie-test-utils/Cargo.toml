@@ -1,0 +1,10 @@
+[package]
+name = "trie-test-utils"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kairos-trie = { path = "../" }
+proptest = { version = "1" }
+sha2 = "0.10"
+arbitrary = { version = "1", features = ["derive"] }
