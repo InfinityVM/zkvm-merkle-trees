@@ -1,0 +1,31 @@
+[package]
+name = "kairos-trie-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+zkvm-merkle-btree = { path = "../zkvm-merkle-btree" }
+btree-test-utils = { path = "../zkvm-merkle-btree/btree-test-utils" }
+
+kairos-trie = { path = "../kairos-trie" }
+trie-test-utils = { path = "../kairos-trie/trie-test-utils" }
+
+[[bin]]
+name = "btree_ops"
+path = "fuzz_targets/btree_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trie_ops"
+path = "fuzz_targets/trie_ops.rs"
+test = false
+doc = false
+bench = false

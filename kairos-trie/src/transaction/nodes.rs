@@ -141,10 +141,10 @@ impl<'s, V> StoredLeafRef<'s, V> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct BranchMask {
     /// The index of the discriminant bit in the 256 bit hash key.
-    bit_idx: u32,
+    pub bit_idx: u32,
 
     /// Common prefix of word at `bit_idx / 32`, a 0 discriminant bit, and trailing 0s
-    left_prefix: u32,
+    pub left_prefix: u32,
 }
 
 impl BranchMask {
@@ -454,9 +454,36 @@ impl<V> Branch<NodeRef<V>> {
                 let prior_word_idx = word_idx.wrapping_sub(1);
                 let prior_word = leaf.key_hash.0.get(prior_word_idx).unwrap_or(&0);
 
+                #[cfg(debug_assertions)]
+                if let Some(last) = self.prefix.last() {
+                    debug_assert_eq!(*last, *prior_word);
+                }
+
+                let mut new_prefix = mem::take(&mut self.prefix).into_vec();
+                new_prefix.pop();
+
+                #[cfg(debug_assertions)]
+                {
+                    let debug_prefix = &leaf.key_hash.0[..word_idx.saturating_sub(1)];
+
+                    let equal = debug_prefix
+                        .iter()
+                        .rev()
+                        .zip(new_prefix.iter().rev())
+                        .all(|(key_word, branch_word)| key_word == branch_word);
+
+                    debug_assert!(
+                        equal,
+                        "prefix: {:?}, debug_prefix: {:?}",
+                        new_prefix, debug_prefix
+                    );
+                }
+
                 (mask, *prior_word, mem::take(&mut self.prefix), leaf_word)
             }
             KeyPositionAdjacent::PrefixVec(word_idx) => {
+                dbg!(word_idx);
+                dbg!(self.mask.word_idx());
                 debug_assert!(self.mask.word_idx() - word_idx >= 2);
                 debug_assert!(!self.prefix.is_empty());
 
@@ -474,7 +501,7 @@ impl<V> Branch<NodeRef<V>> {
                 let prefix_offset = word_idx.saturating_sub(self.prefix.len() + 1);
 
                 let new_prefix = leaf.key_hash.0[prefix_offset..word_idx.saturating_sub(1)].into();
-                let old_prefix = self.prefix[word_idx + 1 - prefix_offset..].into();
+                let old_prefix = self.prefix[word_idx - prefix_offset..].into();
 
                 let branch_word = self.prefix[word_idx - prefix_offset];
                 let leaf_word = leaf.key_hash.0[word_idx];

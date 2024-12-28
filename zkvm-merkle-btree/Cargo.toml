@@ -20,6 +20,7 @@ serde = { version = "1", default-features = false, features = [
 ], optional = true }
 
 [dev-dependencies]
+btree-test-utils = { path = "./btree-test-utils" }
 proptest-derive = { version = "0.5" }
 proptest = { version = "1" }
 sha2 = "0.10"

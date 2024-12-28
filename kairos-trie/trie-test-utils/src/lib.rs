@@ -1,23 +1,19 @@
-#![allow(unused)]
-
 use std::{
-    collections::{hash_map, HashMap},
+    collections::{HashMap, hash_map},
     rc::Rc,
 };
 
 use proptest::{prelude::*, sample::SizeRange};
 
 use kairos_trie::{
+    DigestHasher, KeyHash, NodeHash, Transaction, TrieRoot,
     stored::{
+        Store,
         memory_db::MemoryDb,
         merkle::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
-        Store,
     },
-    DigestHasher, KeyHash, NodeHash, Transaction, TrieRoot,
 };
 use sha2::Sha256;
-
-use super::arb_key_hash;
 
 pub type Value = [u8; 8];
 
@@ -30,6 +26,31 @@ pub enum Operation {
     EntryAndModifyOrInsert(KeyHash, Value),
     EntryOrInsert(KeyHash, Value),
     Remove(KeyHash),
+}
+
+impl<'a> arbitrary::Arbitrary<'a> for Operation {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let variant = u.int_in_range(0..=6)?;
+        let key = KeyHash::from(&u.arbitrary::<[u8; 32]>()?);
+        let value = u.arbitrary::<[u8; 8]>()?;
+
+        match variant {
+            0 => Ok(Operation::Get(key)),
+            1 => Ok(Operation::Insert(key, value)),
+            2 => Ok(Operation::EntryGet(key)),
+            3 => Ok(Operation::EntryInsert(key, value)),
+            4 => Ok(Operation::EntryAndModifyOrInsert(key, value)),
+            5 => Ok(Operation::EntryOrInsert(key, value)),
+            6 => Ok(Operation::Remove(key)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+prop_compose! {
+    pub fn arb_key_hash()(data in any::<[u8; 32]>()) -> KeyHash {
+        KeyHash::from(&data)
+    }
 }
 
 prop_compose! {
@@ -103,11 +124,12 @@ pub fn run_against_snapshot_builder(
     db: Rc<MemoryDb<Value>>,
     hash_map: &mut HashMap<KeyHash, Value>,
 ) -> (TrieRoot<NodeHash>, Snapshot<Value>) {
-    let bump = bumpalo::Bump::new();
     let builder = SnapshotBuilder::empty(db).with_trie_root_hash(old_root_hash);
     let mut txn = Transaction::from_snapshot_builder(builder);
 
     for op in batch {
+        // txn.print_modified_tree();
+        // eprintln!("{:?}\n\n\n", op);
         let (old, new) = trie_op(op, &mut txn);
         let (old_hm, new_hm) = hashmap_op(op, hash_map);
         assert_eq!(old, old_hm);
@@ -115,6 +137,8 @@ pub fn run_against_snapshot_builder(
     }
 
     let new_root_hash = txn.commit(&mut DigestHasher::<Sha256>::default()).unwrap();
+    //FIXME: remove
+    // txn.print_modified_tree();
     let snapshot = txn.build_initial_snapshot();
     (new_root_hash, snapshot)
 }
@@ -271,5 +295,40 @@ fn hashmap_op(op: &Operation, map: &mut HashMap<KeyHash, Value>) -> (Option<Valu
             let old = map.remove(key);
             (old, None)
         }
+    }
+}
+
+pub fn end_to_end_entry_ops(batches: Vec<Vec<Operation>>) {
+    // The persistent backing, likely rocksdb
+    let db = Rc::new(MemoryDb::<[u8; 8]>::empty());
+
+    // An empty trie root
+    let mut prior_root_hash = TrieRoot::default();
+
+    // used as a reference for trie behavior
+    let mut hash_map = HashMap::new();
+
+    for batch in batches.iter() {
+        eprintln!("Batch size: {}", batch.len());
+        // We build a snapshot on the server.
+        let (new_root_hash, snapshot) =
+            run_against_snapshot_builder(batch, prior_root_hash, db.clone(), &mut hash_map);
+
+        // We verify the snapshot in a zkVM
+        run_against_snapshot(batch, snapshot, new_root_hash, prior_root_hash);
+
+        // After a batch is verified in an on chain zkVM the contract would update's its root hash
+        prior_root_hash = new_root_hash;
+    }
+
+    // After all batches are applied, the trie and the hashmap should be in sync
+    let txn = Transaction::from_snapshot_builder(
+        SnapshotBuilder::<_, [u8; 8]>::empty(db).with_trie_root_hash(prior_root_hash),
+    );
+
+    // Check that the trie and the hashmap are in sync
+    for (k, v) in hash_map.iter() {
+        let ret_v = txn.get(k).unwrap().unwrap();
+        assert_eq!(v, ret_v);
     }
 }
