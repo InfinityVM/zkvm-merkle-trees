@@ -8,6 +8,7 @@ members = [
 	"zkvm-merkle-btree",
 	"zkvm-merkle-btree/btree-test-utils",
 	"fuzz",
+	"fuzz-afl",
 ]
 
 

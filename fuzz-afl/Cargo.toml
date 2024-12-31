@@ -1,0 +1,25 @@
+[package]
+name = "fuzz-afl"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "btree_ops_afl"
+path = "src/btree_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trie_ops_afl"
+path = "src/trie_ops.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+afl = "*"
+arbitrary = "*"
+
+btree-test-utils = { path = "../zkvm-merkle-btree/btree-test-utils" }
+trie-test-utils = { path = "../kairos-trie/trie-test-utils" }
