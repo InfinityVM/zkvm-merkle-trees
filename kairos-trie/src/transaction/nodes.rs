@@ -227,11 +227,6 @@ impl BranchMask {
     pub fn prefix_mask(&self) -> u32 {
         self.prefix_discriminant_mask() ^ self.discriminant_bit_mask()
     }
-
-    #[inline(always)]
-    pub const fn trailing_bits_mask(&self) -> u32 {
-        u32::MAX << (self.relative_bit_idx() + 1)
-    }
 }
 
 #[cfg(all(feature = "std", test))]
@@ -461,9 +456,49 @@ impl<V> Branch<NodeRef<V>> {
 
                 let mut new_prefix = mem::take(&mut self.prefix).into_vec();
                 new_prefix.pop();
+                self.prefix = new_prefix.into();
 
                 #[cfg(debug_assertions)]
                 {
+                    let debug_prefix = &leaf.key_hash.0[..word_idx.saturating_sub(1)];
+
+                    let equal = debug_prefix
+                        .iter()
+                        .rev()
+                        .zip(self.prefix.iter().rev())
+                        .all(|(key_word, branch_word)| key_word == branch_word);
+
+                    debug_assert!(
+                        equal,
+                        "prefix: {:?}, debug_prefix: {:?}",
+                        self.prefix, debug_prefix
+                    );
+                }
+
+                (mask, *prior_word, mem::take(&mut self.prefix), leaf_word)
+            }
+            KeyPositionAdjacent::PrefixVec(word_idx) => {
+                debug_assert!(self.mask.word_idx() - word_idx >= 2);
+                debug_assert!(!self.prefix.is_empty());
+
+                // The -1 is to account for the prior word.
+                let prefix_start_idx = self.mask.word_idx() - self.prefix.len() - 1;
+
+                debug_assert!(self.mask.word_idx() > self.prefix.len());
+
+                // dbg!(word_idx);
+                // dbg!(self.mask.word_idx());
+                // dbg!(prefix_start_idx);
+                // dbg!(&self.prefix);
+                let word_idx_in_prefix = word_idx - prefix_start_idx;
+
+                let new_prefix: Box<[u32]> =
+                    self.prefix[..(word_idx_in_prefix.saturating_sub(1))].into();
+                let old_prefix = self.prefix[(word_idx_in_prefix)..].into();
+
+                #[cfg(debug_assertions)]
+                {
+                    // The -1 is to account for the prior word.
                     let debug_prefix = &leaf.key_hash.0[..word_idx.saturating_sub(1)];
 
                     let equal = debug_prefix
@@ -479,32 +514,17 @@ impl<V> Branch<NodeRef<V>> {
                     );
                 }
 
-                (mask, *prior_word, mem::take(&mut self.prefix), leaf_word)
-            }
-            KeyPositionAdjacent::PrefixVec(word_idx) => {
-                dbg!(word_idx);
-                dbg!(self.mask.word_idx());
-                debug_assert!(self.mask.word_idx() - word_idx >= 2);
-                debug_assert!(!self.prefix.is_empty());
+                // dbg!(word_idx_in_prefix);
+                // dbg!(&new_prefix);
+                // dbg!(&old_prefix);
 
-                // we don't include word or prior_word in the prefix
-                let key_prefix = &leaf.key_hash.0[..word_idx.saturating_sub(1)];
-                let delta_in_prefix = key_prefix
-                    .iter()
-                    .rev()
-                    .zip(self.prefix.iter().rev())
-                    .enumerate()
-                    .find(|(_, (key_word, branch_word))| key_word != branch_word);
-
-                debug_assert_eq!(delta_in_prefix, None);
-
-                let prefix_offset = word_idx.saturating_sub(self.prefix.len() + 1);
-
-                let new_prefix = leaf.key_hash.0[prefix_offset..word_idx.saturating_sub(1)].into();
-                let old_prefix = self.prefix[word_idx - prefix_offset..].into();
-
-                let branch_word = self.prefix[word_idx - prefix_offset];
+                // dbg!(leaf.key_hash.0);
+                let branch_word = self.prefix[word_idx_in_prefix];
                 let leaf_word = leaf.key_hash.0[word_idx];
+
+                // dbg!(branch_word);
+                // dbg!(leaf_word);
+                debug_assert!(branch_word != leaf_word);
                 let mask = BranchMask::new(word_idx as u32, branch_word, leaf_word);
 
                 let prior_word_idx = word_idx.wrapping_sub(1);

@@ -2,7 +2,7 @@ pub(crate) mod nodes;
 
 use alloc::borrow::Cow;
 use alloc::{boxed::Box, format};
-use core::mem;
+use core::{iter, mem};
 
 use crate::stored::merkle::VerifiedSnapshot;
 use crate::stored::DatabaseGet;
@@ -522,11 +522,13 @@ impl<S: Store> Transaction<S> {
                         }
                     }
                 }
-                NodeRef::ModBranch(branch) => {
-                    let key_position = branch.key_position(key_hash);
+                NodeRef::ModBranch(parent_branch) => {
+                    // FIXME remove
+                    let parent_branch_2 = parent_branch.clone();
+                    let key_position = parent_branch.key_position(key_hash);
                     let (matched_child, unmatched_child) = match key_position {
-                        KeyPosition::Left => (&mut branch.left, &mut branch.right),
-                        KeyPosition::Right => (&mut branch.right, &mut branch.left),
+                        KeyPosition::Left => (&mut parent_branch.left, &mut parent_branch.right),
+                        KeyPosition::Right => (&mut parent_branch.right, &mut parent_branch.left),
                         KeyPosition::Adjacent(_) => return Ok(None),
                     };
 
@@ -556,6 +558,12 @@ impl<S: Store> Transaction<S> {
                                     // This should always be true because we checked that the key exists via Self::get_stored_node
                                     // Leaving it here in case we add a remove that doesn't first check if the key exists.
                                     if &leaf.key_hash == key_hash {
+                                        Self::adjust_sibling_prefix(
+                                            data_store,
+                                            unmatched_child,
+                                            &parent_branch_2,
+                                        )?;
+
                                         *parent_node_ref = mem::replace(
                                             unmatched_child,
                                             NodeRef::temp_null_stored(),
@@ -590,6 +598,12 @@ impl<S: Store> Transaction<S> {
                                     unreachable!("We just matched a ModLeaf");
                                 };
 
+                                Self::adjust_sibling_prefix(
+                                    data_store,
+                                    unmatched_child,
+                                    &parent_branch_2,
+                                )?;
+
                                 *parent_node_ref =
                                     mem::replace(unmatched_child, NodeRef::temp_null_stored());
                                 return Ok(Some(leaf.value));
@@ -611,6 +625,78 @@ impl<S: Store> Transaction<S> {
                 KeyPosition::Left => parent_node_ref = &mut branch.left,
                 KeyPosition::Right => parent_node_ref = &mut branch.right,
                 KeyPosition::Adjacent(_) => return Ok(None),
+            }
+        }
+    }
+
+    // This method adds the parent's prefix and prior_word to the unmatched_child if needed.
+    fn adjust_sibling_prefix(
+        data_store: &S,
+        unmatched_child: &mut NodeRef<S::Value>,
+        parent_branch: &Branch<NodeRef<S::Value>>,
+    ) -> Result<(), String> {
+        let parent_prefix = &parent_branch.prefix;
+        let parent_prior_word = parent_branch.prior_word;
+
+        // check if we need to add the prefix and prior_word to the unmatched_child
+        let parent_branch_word_idx = parent_branch.mask.word_idx();
+        if parent_branch.mask.word_idx() == 0 {
+            Ok(())
+        } else {
+            match unmatched_child {
+                NodeRef::ModLeaf(_) => Ok(()),
+                NodeRef::ModBranch(branch)
+                    if parent_branch_word_idx == branch.mask.word_idx()
+                        && parent_prefix.is_empty() =>
+                {
+                    Ok(())
+                }
+                NodeRef::ModBranch(branch) => {
+                    branch.prefix = parent_prefix
+                        .iter()
+                        .chain(iter::once(&parent_prior_word))
+                        .chain(&branch.prefix)
+                        .copied()
+                        .collect();
+                    Ok(())
+                }
+                // This creates an unessary read and maybe write of the stored node.
+                // We could avoid this by using extendion nodes instead of prefixes.
+                NodeRef::Stored(stored_idx) => {
+                    let node = data_store.get_node(*stored_idx).map_err(|e| {
+                                                        format!(
+                                                            "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
+                                                            file = file!(),
+                                                            line = line!(),
+                                                            column = column!(),
+                                                        )
+                                                    })?;
+
+                    match node {
+                        Node::Leaf(_) => Ok(()),
+                        Node::Branch(branch)
+                            if parent_branch_word_idx == branch.mask.word_idx()
+                                && parent_prefix.is_empty() =>
+                        {
+                            Ok(())
+                        }
+                        Node::Branch(branch) => {
+                            *unmatched_child = NodeRef::ModBranch(Box::new(Branch {
+                                left: NodeRef::Stored(branch.left),
+                                right: NodeRef::Stored(branch.right),
+                                mask: branch.mask,
+                                prior_word: branch.prior_word,
+                                prefix: parent_prefix
+                                    .iter()
+                                    .chain(iter::once(&parent_prior_word))
+                                    .chain(&branch.prefix)
+                                    .copied()
+                                    .collect(),
+                            }));
+                            Ok(())
+                        }
+                    }
+                }
             }
         }
     }
@@ -767,11 +853,11 @@ impl<S: Store> Transaction<S> {
                     indent,
                     branch.mask.prefix_discriminant_mask()
                 );
-                println!(
-                    "{}      trailing_bits_mask: {:032b}",
-                    indent,
-                    branch.mask.trailing_bits_mask()
-                );
+                // println!(
+                //     "{}      trailing_bits_mask: {:032b}",
+                //     indent,
+                //     branch.mask.trailing_bits_mask()
+                // );
                 println!("{}  prior_word: {:032b},", indent, branch.prior_word);
                 println!(
                     "{}  prefix: [{}],",

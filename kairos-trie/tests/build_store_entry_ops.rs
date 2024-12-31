@@ -309,3 +309,126 @@ fn matching_prefix_test_2() {
 
     end_to_end_entry_ops(operations);
 }
+#[test]
+fn matching_prefix_test_3() {
+    let operations = vec![vec![
+        Operation::Insert(KeyHash([1, 1, 1, 0, 0, 0, 0, 0]), [1, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 1, 0, 0, 1, 0, 0]), [2, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 0, 0, 0, 0, 0, 0]), [3, 0, 0, 0, 0, 0, 0, 0]),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}
+
+#[test]
+fn matching_prefix_test_4() {
+    let operations = vec![vec![
+        Operation::Insert(KeyHash([1, 1, 1, 1, 1, 0, 0, 0]), [1, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 1, 1, 0, 0, 0, 0]), [2, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 0, 0, 0, 0, 0, 0, 0]), [3, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 0, 0, 0, 0, 0, 0]), [4, 0, 0, 0, 0, 0, 0, 0]),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}
+
+#[test]
+fn shift_error_test_1() {
+    let operations = vec![vec![
+        Operation::EntryOrInsert(
+            KeyHash([2147483648, 0, 0, 0, 0, 0, 0, 0]),
+            [0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        Operation::EntryInsert(KeyHash([0, 0, 0, 0, 0, 0, 0, 0]), [0, 0, 0, 0, 0, 0, 0, 0]),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}
+
+#[test]
+fn additional_test_case_1() {
+    let operations = vec![vec![
+        Operation::Insert(KeyHash([1, 1, 1, 1, 1, 1, 1, 0]), [1, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 1, 1, 1, 1, 0, 0]), [2, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 1, 1, 1, 0, 0, 0]), [3, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 1, 0, 0, 0, 0, 0, 0]), [4, 0, 0, 0, 0, 0, 0, 0]),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}
+
+#[test]
+fn additional_test_case_2() {
+    let operations = vec![
+        vec![
+            Operation::Insert(
+                KeyHash([
+                    3082270391, 3072898999, 3082270647, 3082205111, 3082270647, 3082270647,
+                    3082270647, 3082270647,
+                ]),
+                [1, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            Operation::Insert(
+                KeyHash([
+                    3082270647, 3082270647, 3082270647, 3082270647, 3082270647, 3082270647,
+                    3082270647, 3082270647,
+                ]),
+                [2, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ],
+        vec![
+            Operation::Insert(
+                KeyHash([
+                    3082234039, 3082270647, 3082270647, 3082270647, 3082270647, 3082270647,
+                    3082270391, 3072898999,
+                ]),
+                [3, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            Operation::Insert(
+                KeyHash([
+                    3082270647, 3082270647, 4294967223, 3086952447, 3082270647, 3082244279,
+                    3082270647, 3082270647,
+                ]),
+                [4, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ],
+        vec![
+            Operation::Insert(
+                KeyHash([
+                    3082234039, 3082270647, 3082270647, 3082270647, 3082270647, 3082270647,
+                    3082270647, 3082270647,
+                ]),
+                [5, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            Operation::Insert(
+                KeyHash([
+                    3082234039, 3082270647, 3082270647, 3082270647, 3082270504, 3082270647,
+                    3082205111, 3072898999,
+                ]),
+                [6, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            Operation::Insert(
+                KeyHash([
+                    3082270647, 4290230199, 3082270647, 3075520439, 3082270647, 3082270647, 29111,
+                    0,
+                ]),
+                [7, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ],
+    ];
+
+    end_to_end_entry_ops(operations);
+}
+
+#[test]
+fn additional_test_case_3() {
+    let operations = vec![vec![
+        Operation::Insert(KeyHash([1, 2, 3, 4, 5, 0, 0, 0]), [1, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 2, 3, 4, 5, 0, 2, 2]), [2, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(KeyHash([1, 2, 2, 2, 0, 2, 0, 0]), [3, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Remove(KeyHash([1, 2, 2, 2, 0, 2, 0, 0])),
+        Operation::Insert(KeyHash([0, 0, 0, 0, 0, 0, 0, 0]), [4, 0, 0, 0, 0, 0, 0, 0]),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}
