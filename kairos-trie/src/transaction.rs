@@ -746,17 +746,22 @@ impl<S: Store> Transaction<S> {
             })),
             TrieRoot::Node(ref mut root) => {
                 let mut node_ref = root;
-                loop {
+                let last_word_idx = loop {
+                    let mut last_word_idx = 0;
+
                     let go_right = match &*node_ref {
-                        NodeRef::ModBranch(branch) => match branch.key_position(key_hash) {
-                            KeyPosition::Left => false,
-                            KeyPosition::Right => true,
-                            KeyPosition::Adjacent(pos) => {
-                                key_position = pos;
-                                break;
+                        NodeRef::ModBranch(branch) => {
+                            last_word_idx = branch.mask.word_idx();
+                            match branch.key_position(key_hash) {
+                                KeyPosition::Left => false,
+                                KeyPosition::Right => true,
+                                KeyPosition::Adjacent(pos) => {
+                                    key_position = pos;
+                                    break last_word_idx;
+                                }
                             }
-                        },
-                        NodeRef::ModLeaf(_) => break,
+                        }
+                        NodeRef::ModLeaf(_) => break last_word_idx,
                         NodeRef::Stored(idx) => {
                             let loaded_node = self.data_store.get_node(*idx).map_err(|e| {
                                 format!(
@@ -790,7 +795,7 @@ impl<S: Store> Transaction<S> {
                         }
                         _ => unreachable!("We just matched a ModBranch"),
                     }
-                }
+                };
 
                 // This convoluted return makes the borrow checker happy.
                 if let NodeRef::ModLeaf(leaf) = &*node_ref {
@@ -806,6 +811,7 @@ impl<S: Store> Transaction<S> {
                             parent: node_ref,
                             key_hash: *key_hash,
                             key_position,
+                            last_word_idx,
                         }));
                     }
                 };
@@ -815,6 +821,7 @@ impl<S: Store> Transaction<S> {
                         parent: node_ref,
                         key_hash: *key_hash,
                         key_position,
+                        last_word_idx,
                     }))
                 } else if let NodeRef::ModLeaf(leaf) = &mut *node_ref {
                     Ok(Entry::Occupied(OccupiedEntry { leaf }))
@@ -1175,6 +1182,8 @@ pub struct VacantEntry<'a, V> {
     parent: &'a mut NodeRef<V>,
     key_hash: KeyHash,
     key_position: KeyPositionAdjacent,
+    // The word index of the last branch we traversed.
+    last_word_idx: usize,
 }
 
 impl<'a, V> VacantEntry<'a, V> {
@@ -1194,8 +1203,11 @@ impl<'a, V> VacantEntry<'a, V> {
             parent,
             key_hash,
             key_position,
+            last_word_idx,
         } = self;
         if let NodeRef::ModBranch(branch) = parent {
+            debug_assert_eq!(branch.mask.word_idx(), last_word_idx);
+
             let leaf =
                 branch.new_adjacent_leaf_ret(key_position, Box::new(Leaf { key_hash, value }));
             return &mut leaf.value;
@@ -1205,7 +1217,7 @@ impl<'a, V> VacantEntry<'a, V> {
         match owned_parent {
             NodeRef::ModLeaf(old_leaf) => {
                 let (new_branch, new_leaf_is_right) = Branch::new_from_leafs(
-                    parent.branch().unwrap().mask.word_idx(),
+                    last_word_idx,
                     old_leaf,
                     Box::new(Leaf { key_hash, value }),
                 );
