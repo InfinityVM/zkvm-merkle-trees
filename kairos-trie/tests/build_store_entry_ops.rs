@@ -450,3 +450,28 @@ fn additional_test_case_4() {
 
     end_to_end_entry_ops(operations);
 }
+
+#[test]
+fn test_max_min_key_entries() {
+    let operations = vec![vec![
+        Operation::EntryInsert(
+            KeyHash([
+                4294967295,
+                4294967295,
+                2686975,
+                4294901760,
+                150953727,
+                4278190080,
+                4294967295,
+                4294967295,
+            ]),
+            [255, 255, 255, 255, 255, 255, 255, 255],
+        ),
+        Operation::EntryOrInsert(
+            KeyHash([0, 0, 0, 0, 0, 0, 0, 0]),
+            [0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}
