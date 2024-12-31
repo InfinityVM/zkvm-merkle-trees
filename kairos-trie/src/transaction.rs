@@ -260,13 +260,27 @@ impl<S: Store> Transaction<S> {
         mut node_ref: &'root NodeRef<S::Value>,
         key_hash: &KeyHash,
     ) -> Result<Option<&'root S::Value>, TrieError> {
+        let mut last_bit_idx = 0;
+        let mut last_word_idx = 0;
         loop {
             match node_ref {
-                NodeRef::ModBranch(branch) => match branch.key_position(key_hash) {
-                    KeyPosition::Left => node_ref = &branch.left,
-                    KeyPosition::Right => node_ref = &branch.right,
-                    KeyPosition::Adjacent(_) => return Ok(None),
-                },
+                NodeRef::ModBranch(branch) => {
+                    debug_assert!(branch.mask.word_idx() >= last_word_idx);
+                    debug_assert!(branch.mask.bit_idx >= last_bit_idx);
+                    debug_assert_eq!(
+                        branch.prefix.len(),
+                        branch.mask.word_idx().saturating_sub(last_word_idx + 1)
+                    );
+
+                    last_bit_idx = branch.mask.bit_idx;
+                    last_word_idx = branch.mask.word_idx();
+
+                    match branch.key_position(key_hash) {
+                        KeyPosition::Left => node_ref = &branch.left,
+                        KeyPosition::Right => node_ref = &branch.right,
+                        KeyPosition::Adjacent(_) => return Ok(None),
+                    }
+                }
                 NodeRef::ModLeaf(leaf) => {
                     if leaf.key_hash == *key_hash {
                         return Ok(Some(&leaf.value));
@@ -507,6 +521,7 @@ impl<S: Store> Transaction<S> {
         mut parent_node_ref: &mut NodeRef<S::Value>,
         key_hash: &KeyHash,
     ) -> Result<Option<S::Value>, TrieError> {
+        let mut grandparent_word_idx = 0usize;
         loop {
             let key_position = match parent_node_ref {
                 NodeRef::ModLeaf(_) => unreachable!("A leaf should never be a parent"),
@@ -576,6 +591,7 @@ impl<S: Store> Transaction<S> {
                                             data_store,
                                             unmatched_child,
                                             &parent_branch_2,
+                                            grandparent_word_idx,
                                         )?;
 
                                         *parent_node_ref = mem::replace(
@@ -616,6 +632,7 @@ impl<S: Store> Transaction<S> {
                                     data_store,
                                     unmatched_child,
                                     &parent_branch_2,
+                                    grandparent_word_idx,
                                 )?;
 
                                 *parent_node_ref =
@@ -635,6 +652,8 @@ impl<S: Store> Transaction<S> {
                 unreachable!("We just matched a ModBranch");
             };
 
+            grandparent_word_idx = branch.mask.word_idx();
+
             match key_position {
                 KeyPosition::Left => parent_node_ref = &mut branch.left,
                 KeyPosition::Right => parent_node_ref = &mut branch.right,
@@ -648,6 +667,7 @@ impl<S: Store> Transaction<S> {
         data_store: &S,
         unmatched_child: &mut NodeRef<S::Value>,
         parent_branch: &Branch<NodeRef<S::Value>>,
+        grandparent_word_idx: usize,
     ) -> Result<(), String> {
         let parent_prefix = &parent_branch.prefix;
         let parent_prior_word = parent_branch.prior_word;
@@ -658,7 +678,30 @@ impl<S: Store> Transaction<S> {
         // There cannot be a prefix if the word_idx is 0 or 1
         // word_idx 0 prefix is 0
         // word_idx 1 prefix is prior_word
-        if parent_branch.mask.word_idx() <= 1 {
+        if parent_branch.mask.word_idx() == 0 {
+            debug_assert!(parent_prefix.is_empty());
+            debug_assert!(parent_prior_word == 0);
+            debug_assert!(grandparent_word_idx == 0);
+
+            #[cfg(debug_assertions)]
+            if let NodeRef::ModBranch(branch) = unmatched_child {
+                let word_idx = branch.mask.word_idx();
+                if word_idx == 0 {
+                    debug_assert!(branch.prefix.is_empty());
+                    debug_assert!(branch.prior_word == 0);
+                } else if word_idx == 1 {
+                    debug_assert!(branch.prefix.is_empty());
+                } else {
+                    debug_assert_eq!(
+                        branch.prefix.len(),
+                        word_idx.saturating_sub(parent_branch_word_idx + 1)
+                    )
+                }
+            }
+
+            Ok(())
+        } else if parent_branch_word_idx == grandparent_word_idx {
+            debug_assert!(parent_prefix.is_empty());
             Ok(())
         } else {
             let new_prefix = |word_idx, prefix: &[u32]| {
@@ -677,6 +720,9 @@ impl<S: Store> Transaction<S> {
 
             match unmatched_child {
                 NodeRef::ModLeaf(_) => Ok(()),
+                // We don't need to add a parent prefix or prior_word
+                // the prior_word is already the same
+                // and the prefix is empty
                 NodeRef::ModBranch(branch)
                     if parent_branch_word_idx == branch.mask.word_idx()
                         && parent_prefix.is_empty() =>
@@ -746,11 +792,16 @@ impl<S: Store> Transaction<S> {
             })),
             TrieRoot::Node(ref mut root) => {
                 let mut node_ref = root;
-                let last_word_idx = loop {
-                    let mut last_word_idx = 0;
+                let mut last_word_idx = 0;
+                let mut last_bit_idx = 0;
 
+                let last_word_idx = loop {
                     let go_right = match &*node_ref {
                         NodeRef::ModBranch(branch) => {
+                            debug_assert!(branch.mask.word_idx() >= last_word_idx);
+                            debug_assert!(branch.mask.bit_idx >= last_bit_idx);
+                            last_bit_idx = branch.mask.bit_idx;
+
                             last_word_idx = branch.mask.word_idx();
                             match branch.key_position(key_hash) {
                                 KeyPosition::Left => false,

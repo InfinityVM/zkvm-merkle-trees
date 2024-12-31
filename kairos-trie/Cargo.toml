@@ -13,7 +13,10 @@ serde = ["dep:serde"]
 digest = "0.10"
 bumpalo = "3"
 ouroboros = "0.18"
-serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "alloc",
+], optional = true }
 
 
 [dev-dependencies]
