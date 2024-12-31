@@ -432,3 +432,21 @@ fn additional_test_case_3() {
 
     end_to_end_entry_ops(operations);
 }
+
+#[test]
+fn additional_test_case_4() {
+    let operations = vec![vec![
+        Operation::Insert(
+            KeyHash([1, 1, 1, 4294508571, 2490367, 0, 1, 1]),
+            [1, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        Operation::Insert(KeyHash([1, 1, 1, 1, 2, 1, 3, 4]), [2, 0, 0, 0, 0, 0, 0, 0]),
+        Operation::Insert(
+            KeyHash([1, 1, 1, 27, 2424832, 0, 1, 1]),
+            [3, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        Operation::Remove(KeyHash([1, 1, 1, 1, 2, 1, 3, 4])),
+    ]];
+
+    end_to_end_entry_ops(operations);
+}

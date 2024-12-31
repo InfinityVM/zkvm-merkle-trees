@@ -340,29 +340,44 @@ impl<S: Store> Transaction<S> {
         key_hash: &KeyHash,
         value: S::Value,
     ) -> Result<(), TrieError> {
+        let mut last_bit_idx = 0;
+        let mut last_word_idx = 0;
+
         loop {
             match node_ref {
-                NodeRef::ModBranch(branch) => match branch.key_position(key_hash) {
-                    KeyPosition::Left => {
-                        node_ref = &mut branch.left;
-                        continue;
-                    }
-                    KeyPosition::Right => {
-                        node_ref = &mut branch.right;
-                        continue;
-                    }
-                    KeyPosition::Adjacent(pos) => {
-                        branch.new_adjacent_leaf(
-                            pos,
-                            Box::new(Leaf {
-                                key_hash: *key_hash,
-                                value,
-                            }),
-                        );
+                NodeRef::ModBranch(branch) => {
+                    debug_assert!(branch.mask.word_idx() >= last_word_idx);
+                    debug_assert!(branch.mask.bit_idx >= last_bit_idx);
+                    debug_assert_eq!(
+                        branch.prefix.len(),
+                        branch.mask.word_idx().saturating_sub(last_word_idx + 1)
+                    );
 
-                        return Ok(());
+                    last_bit_idx = branch.mask.bit_idx;
+                    last_word_idx = branch.mask.word_idx();
+
+                    match branch.key_position(key_hash) {
+                        KeyPosition::Left => {
+                            node_ref = &mut branch.left;
+                            continue;
+                        }
+                        KeyPosition::Right => {
+                            node_ref = &mut branch.right;
+                            continue;
+                        }
+                        KeyPosition::Adjacent(pos) => {
+                            branch.new_adjacent_leaf(
+                                pos,
+                                Box::new(Leaf {
+                                    key_hash: *key_hash,
+                                    value,
+                                }),
+                            );
+
+                            return Ok(());
+                        }
                     }
-                },
+                }
                 NodeRef::ModLeaf(leaf) => {
                     if leaf.key_hash == *key_hash {
                         leaf.value = value;
@@ -378,7 +393,8 @@ impl<S: Store> Transaction<S> {
                             value,
                         });
 
-                        let (new_branch, _) = Branch::new_from_leafs(0, old_leaf, new_leaf);
+                        let (new_branch, _) =
+                            Branch::new_from_leafs(last_word_idx, old_leaf, new_leaf);
 
                         *node_ref = NodeRef::ModBranch(new_branch);
                         return Ok(());
@@ -410,9 +426,7 @@ impl<S: Store> Transaction<S> {
                                 return Ok(());
                             } else {
                                 let (new_branch, _) = Branch::new_from_leafs(
-                                    // TODO we can use the most recent branch.word_idx - 1
-                                    // not sure if it's worth it, 0 is always correct.
-                                    0,
+                                    last_word_idx,
                                     StoredLeafRef::new(leaf, *stored_idx),
                                     Box::new(Leaf {
                                         key_hash: *key_hash,
@@ -640,9 +654,27 @@ impl<S: Store> Transaction<S> {
 
         // check if we need to add the prefix and prior_word to the unmatched_child
         let parent_branch_word_idx = parent_branch.mask.word_idx();
-        if parent_branch.mask.word_idx() == 0 {
+
+        // There cannot be a prefix if the word_idx is 0 or 1
+        // word_idx 0 prefix is 0
+        // word_idx 1 prefix is prior_word
+        if parent_branch.mask.word_idx() <= 1 {
             Ok(())
         } else {
+            let new_prefix = |word_idx, prefix: &[u32]| {
+                if word_idx == parent_branch_word_idx {
+                    debug_assert!(prefix.is_empty());
+                    parent_prefix.iter().copied().collect()
+                } else {
+                    parent_prefix
+                        .iter()
+                        .chain(iter::once(&parent_prior_word))
+                        .chain(prefix)
+                        .copied()
+                        .collect()
+                }
+            };
+
             match unmatched_child {
                 NodeRef::ModLeaf(_) => Ok(()),
                 NodeRef::ModBranch(branch)
@@ -652,25 +684,21 @@ impl<S: Store> Transaction<S> {
                     Ok(())
                 }
                 NodeRef::ModBranch(branch) => {
-                    branch.prefix = parent_prefix
-                        .iter()
-                        .chain(iter::once(&parent_prior_word))
-                        .chain(&branch.prefix)
-                        .copied()
-                        .collect();
+                    branch.prefix = new_prefix(branch.mask.word_idx(), &branch.prefix);
                     Ok(())
                 }
+
                 // This creates an unessary read and maybe write of the stored node.
                 // We could avoid this by using extendion nodes instead of prefixes.
                 NodeRef::Stored(stored_idx) => {
                     let node = data_store.get_node(*stored_idx).map_err(|e| {
-                                                        format!(
-                                                            "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
-                                                            file = file!(),
-                                                            line = line!(),
-                                                            column = column!(),
-                                                        )
-                                                    })?;
+                        format!(
+                            "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
+                            file = file!(),
+                            line = line!(),
+                            column = column!(),
+                            )
+                        })?;
 
                     match node {
                         Node::Leaf(_) => Ok(()),
@@ -686,12 +714,7 @@ impl<S: Store> Transaction<S> {
                                 right: NodeRef::Stored(branch.right),
                                 mask: branch.mask,
                                 prior_word: branch.prior_word,
-                                prefix: parent_prefix
-                                    .iter()
-                                    .chain(iter::once(&parent_prior_word))
-                                    .chain(&branch.prefix)
-                                    .copied()
-                                    .collect(),
+                                prefix: new_prefix(branch.mask.word_idx(), &branch.prefix),
                             }));
                             Ok(())
                         }
@@ -1181,8 +1204,11 @@ impl<'a, V> VacantEntry<'a, V> {
         let owned_parent = mem::replace(parent, NodeRef::temp_null_stored());
         match owned_parent {
             NodeRef::ModLeaf(old_leaf) => {
-                let (new_branch, new_leaf_is_right) =
-                    Branch::new_from_leafs(0, old_leaf, Box::new(Leaf { key_hash, value }));
+                let (new_branch, new_leaf_is_right) = Branch::new_from_leafs(
+                    parent.branch().unwrap().mask.word_idx(),
+                    old_leaf,
+                    Box::new(Leaf { key_hash, value }),
+                );
 
                 *parent = NodeRef::ModBranch(new_branch);
 
