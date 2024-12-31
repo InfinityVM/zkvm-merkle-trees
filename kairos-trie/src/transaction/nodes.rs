@@ -85,6 +85,29 @@ impl<V> NodeRef<V> {
     pub fn temp_null_stored() -> Self {
         NodeRef::Stored(u32::MAX)
     }
+    #[inline(always)]
+    pub fn branch(&self) -> Option<&Branch<Self>> {
+        match self {
+            NodeRef::ModBranch(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn leaf(&self) -> Option<&Leaf<V>> {
+        match self {
+            NodeRef::ModLeaf(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn stored(&self) -> Option<stored::Idx> {
+        match self {
+            NodeRef::Stored(idx) => Some(*idx),
+            _ => None,
+        }
+    }
 }
 
 impl<V> fmt::Debug for NodeRef<V> {
@@ -273,6 +296,7 @@ pub struct Branch<NR> {
     pub prior_word: u32,
     /// The the segment of the hash key from the parent branch to `prior_word`.
     /// Will be empty if the parent_branch.mask.bit_idx / 32 ==  self.mask.bit_idx / 32.
+    /// TODO switch to Vec
     pub prefix: Box<[u32]>,
 }
 
@@ -591,7 +615,12 @@ impl<V> Branch<NodeRef<V>> {
         debug_assert!(new_leaf.key_hash.0[..word_idx] == old_leaf.as_ref().key_hash.0[..word_idx]);
 
         let prior_word_idx = word_idx.saturating_sub(1);
-        let prefix = new_leaf.key_hash.0[prefix_start_idx..prior_word_idx].into();
+        let prefix = if prefix_start_idx <= prior_word_idx {
+            new_leaf.key_hash.0[prefix_start_idx..prior_word_idx].into()
+        } else {
+            vec![].into()
+        };
+
         let prior_word = if word_idx == 0 {
             0
         } else {
