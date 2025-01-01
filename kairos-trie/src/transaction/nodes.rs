@@ -297,7 +297,7 @@ pub struct Branch<NR> {
     /// The the segment of the hash key from the parent branch to `prior_word`.
     /// Will be empty if the parent_branch.mask.bit_idx / 32 ==  self.mask.bit_idx / 32.
     /// TODO switch to Vec
-    pub prefix: Box<[u32]>,
+    pub prefix: Vec<u32>,
 }
 
 impl<NR> fmt::Debug for Branch<NR> {
@@ -478,9 +478,7 @@ impl<V> Branch<NodeRef<V>> {
                     debug_assert_eq!(*last, *prior_word);
                 }
 
-                let mut new_prefix = mem::take(&mut self.prefix).into_vec();
-                new_prefix.pop();
-                self.prefix = new_prefix.into();
+                self.prefix.pop();
 
                 #[cfg(debug_assertions)]
                 {
@@ -510,9 +508,13 @@ impl<V> Branch<NodeRef<V>> {
 
                 debug_assert!(self.mask.word_idx() > self.prefix.len());
 
+                // dbg!(word_idx);
+                // dbg!(self.mask.word_idx());
+                // dbg!(prefix_start_idx);
+                // dbg!(&self.prefix);
                 let word_idx_in_prefix = word_idx - prefix_start_idx;
 
-                let new_prefix: Box<[u32]> =
+                let new_prefix: Vec<u32> =
                     self.prefix[..(word_idx_in_prefix.saturating_sub(1))].into();
                 let old_prefix = self.prefix[(word_idx_in_prefix)..].into();
 
@@ -607,7 +609,7 @@ impl<V> Branch<NodeRef<V>> {
         let prefix = if prefix_start_idx <= prior_word_idx {
             new_leaf.key_hash.0[prefix_start_idx..prior_word_idx].into()
         } else {
-            vec![].into()
+            vec![]
         };
 
         let prior_word = if word_idx == 0 {

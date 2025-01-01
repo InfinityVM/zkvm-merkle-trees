@@ -733,7 +733,7 @@ impl<S: Store> Transaction<S> {
             let new_prefix = |word_idx, prefix: &[u32]| {
                 if word_idx == parent_branch_word_idx {
                     debug_assert!(prefix.is_empty());
-                    parent_prefix.iter().copied().collect()
+                    parent_prefix.to_vec()
                 } else {
                     parent_prefix
                         .iter()
