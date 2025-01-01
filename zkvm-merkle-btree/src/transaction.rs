@@ -450,7 +450,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
             parent_node.merge_or_balance(idx).unwrap()
         };
 
-        if parent_node.is_to_small() {
+        if parent_node.is_too_small() {
             Ok(Remove::Underflow(value))
         } else {
             Ok(Remove::Removed(value))

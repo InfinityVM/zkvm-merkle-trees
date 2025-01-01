@@ -18,7 +18,6 @@ pub trait Store {
         hash_idx: Idx,
     ) -> Result<NodeHash, Self::Error>;
 
-    // TODO: Remove the Arc, there's no way to reuse the allocation.
     fn get(
         &self,
         hash_idx: Idx,

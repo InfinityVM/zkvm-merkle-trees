@@ -45,7 +45,7 @@ impl<K, V> NodeRep<K, V> {
         self.children.len() == Self::max_children()
     }
 
-    pub fn is_to_small(&self) -> bool {
+    pub fn is_too_small(&self) -> bool {
         self.children.len() < Self::min_children()
     }
 
