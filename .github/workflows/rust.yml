@@ -8,20 +8,30 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROPTEST_CASES: 1000
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Build no_std
-      run: cargo build --no-default-features --verbose
-    - name: Build
-      run: cargo clippy --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v3
+      - name: Build
+        run: cargo build --verbose
+      - name: Build no_std
+        run: cargo build --no-default-features --verbose
+      - name: Lint
+        run: cargo clippy --verbose
+      - name: Run tests
+        run: cargo test --verbose
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Run btree fuzz tests
+        run: |
+          cargo fuzz run btree_ops -- -rss_limit_mb=4096 -max_total_time=300
+      - name: Run trie fuzz tests
+        run: |
+          cargo fuzz run trie_ops -- -rss_limit_mb=4096 -max_total_time=300
