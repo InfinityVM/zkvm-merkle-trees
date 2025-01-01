@@ -8,9 +8,9 @@ members = [
 	"zkvm-merkle-btree",
 	"zkvm-merkle-btree/btree-test-utils",
 	"fuzz",
-	"fuzz-afl",
 ]
 
+exclude = [ "fuzz-afl" ]
 
 [profile.test]
 opt-level = 3
