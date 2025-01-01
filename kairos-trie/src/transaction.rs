@@ -522,15 +522,22 @@ impl<S: Store> Transaction<S> {
         key_hash: &KeyHash,
     ) -> Result<Option<S::Value>, TrieError> {
         let mut grandparent_word_idx = 0usize;
-        loop {
-            let key_position = match parent_node_ref {
-                NodeRef::ModLeaf(_) => unreachable!("A leaf should never be a parent"),
-                NodeRef::Stored(stored_idx) => {
-                    if Self::get_stored_node(data_store, *stored_idx, key_hash)?.is_none() {
-                        return Ok(None);
-                    };
 
-                    let node = data_store.get_node(*stored_idx).map_err(|e| {
+        // This label break is sadly necessary to satisfy the borrow checker.
+        // We only break to this label if we have found a leaf with an equal key_hash to remove.
+        let (parent_branch, leaf_key_position) = 'leaf: {
+            loop {
+                let key_position = match parent_node_ref {
+                    NodeRef::ModLeaf(_) => unreachable!("A leaf should never be a parent"),
+                    NodeRef::Stored(stored_idx) => {
+                        // This checks if a leaf with the key_hash under this stored node.
+                        // We perform this extra partial traversal to avoid marking nodes as modified unnecessarily.
+                        // Future work may remove this partial traversal by tracking node status in each node.
+                        if Self::get_stored_node(data_store, *stored_idx, key_hash)?.is_none() {
+                            return Ok(None);
+                        };
+
+                        let node = data_store.get_node(*stored_idx).map_err(|e| {
                         format!(
                             "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
                             file = file!(),
@@ -539,35 +546,35 @@ impl<S: Store> Transaction<S> {
                         )
                     })?;
 
-                    match node {
-                        Node::Branch(branch) => {
-                            *parent_node_ref =
-                                NodeRef::ModBranch(Box::new(Branch::from_stored(branch)));
+                        match node {
+                            Node::Branch(branch) => {
+                                *parent_node_ref =
+                                    NodeRef::ModBranch(Box::new(Branch::from_stored(branch)));
 
-                            continue;
-                        }
-                        Node::Leaf(_) => {
-                            unreachable!("A stored leaf should never be a parent");
+                                continue;
+                            }
+                            Node::Leaf(_) => {
+                                unreachable!("A stored leaf should never be a parent");
+                            }
                         }
                     }
-                }
-                NodeRef::ModBranch(parent_branch) => {
-                    // FIXME remove
-                    let parent_branch_2 = parent_branch.clone();
-                    let key_position = parent_branch.key_position(key_hash);
-                    let (matched_child, unmatched_child) = match key_position {
-                        KeyPosition::Left => (&mut parent_branch.left, &mut parent_branch.right),
-                        KeyPosition::Right => (&mut parent_branch.right, &mut parent_branch.left),
-                        KeyPosition::Adjacent(_) => return Ok(None),
-                    };
+                    NodeRef::ModBranch(parent_branch) => {
+                        let key_position = parent_branch.key_position(key_hash);
+                        let matched_child = match key_position {
+                            KeyPosition::Left => &mut parent_branch.left,
+                            KeyPosition::Right => &mut parent_branch.right,
+                            KeyPosition::Adjacent(_) => return Ok(None),
+                        };
 
-                    match matched_child {
-                        NodeRef::Stored(stored_idx) => {
-                            if Self::get_stored_node(data_store, *stored_idx, key_hash)?.is_none() {
-                                return Ok(None);
-                            };
+                        match matched_child {
+                            NodeRef::Stored(stored_idx) => {
+                                if Self::get_stored_node(data_store, *stored_idx, key_hash)?
+                                    .is_none()
+                                {
+                                    return Ok(None);
+                                };
 
-                            let node = data_store.get_node(*stored_idx).map_err(|e| {
+                                let node = data_store.get_node(*stored_idx).map_err(|e| {
                                 format!(
                                     "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
                                     file = file!(),
@@ -576,90 +583,109 @@ impl<S: Store> Transaction<S> {
                                 )
                             })?;
 
-                            match node {
-                                Node::Branch(branch) => {
-                                    *matched_child =
-                                        NodeRef::ModBranch(Box::new(Branch::from_stored(branch)));
+                                match node {
+                                    Node::Branch(branch) => {
+                                        *matched_child = NodeRef::ModBranch(Box::new(
+                                            Branch::from_stored(branch),
+                                        ));
 
-                                    key_position
-                                }
-                                Node::Leaf(leaf) => {
-                                    // This should always be true because we checked that the key exists via Self::get_stored_node
-                                    // Leaving it here in case we add a remove that doesn't first check if the key exists.
-                                    if &leaf.key_hash == key_hash {
-                                        Self::adjust_sibling_prefix(
-                                            data_store,
-                                            unmatched_child,
-                                            &parent_branch_2,
-                                            grandparent_word_idx,
-                                        )?;
-
-                                        *parent_node_ref = mem::replace(
-                                            unmatched_child,
-                                            NodeRef::temp_null_stored(),
-                                        );
-                                        return Ok(Some(leaf.value.clone()));
-                                    } else {
-                                        #[cfg(debug_assertions)]
-                                        {
-                                            unreachable!(
-                                                "We previously checked that the key exists"
-                                            );
+                                        key_position
+                                    }
+                                    Node::Leaf(leaf) => {
+                                        // This check is technically unnecessary
+                                        // since we already checked that the leaf exists under a parent stored node.
+                                        debug_assert_eq!(leaf.key_hash, *key_hash);
+                                        if leaf.key_hash == *key_hash {
+                                            break 'leaf (parent_branch, key_position);
+                                        } else {
+                                            return Ok(None);
                                         }
-                                        #[allow(unreachable_code)]
-                                        return Ok(None);
                                     }
                                 }
                             }
-                        }
-                        NodeRef::ModBranch(_) => {
-                            // This code path continues below the match
-                            // It is the equivalent of this assignment and continue.
-                            // The assignment to parent_node_ref must be done outside the match to satisfy the borrow checker.
-                            //
-                            // parent_node_ref = matched_child;
-                            // continue;
-                            key_position
-                        }
-                        NodeRef::ModLeaf(leaf) => {
-                            if leaf.key_hash == *key_hash {
-                                let leaf = mem::replace(matched_child, NodeRef::temp_null_stored());
-                                let NodeRef::ModLeaf(leaf) = leaf else {
-                                    unreachable!("We just matched a ModLeaf");
-                                };
-
-                                Self::adjust_sibling_prefix(
-                                    data_store,
-                                    unmatched_child,
-                                    &parent_branch_2,
-                                    grandparent_word_idx,
-                                )?;
-
-                                *parent_node_ref =
-                                    mem::replace(unmatched_child, NodeRef::temp_null_stored());
-                                return Ok(Some(leaf.value));
-                            } else {
-                                return Ok(None);
+                            NodeRef::ModBranch(_) => {
+                                // This code path continues below the match
+                                // It is the equivalent of this assignment and continue.
+                                // The assignment to parent_node_ref must be done outside the match to satisfy the borrow checker.
+                                //
+                                // parent_node_ref = matched_child;
+                                // continue;
+                                key_position
+                            }
+                            NodeRef::ModLeaf(leaf) => {
+                                if leaf.key_hash == *key_hash {
+                                    break 'leaf (parent_branch, key_position);
+                                } else {
+                                    return Ok(None);
+                                }
                             }
                         }
                     }
+                };
+
+                // This code path is only taken if the matched_child is a ModBranch
+                // See the comment there.
+                let NodeRef::ModBranch(branch) = parent_node_ref else {
+                    unreachable!("We just matched a ModBranch");
+                };
+
+                grandparent_word_idx = branch.mask.word_idx();
+
+                match key_position {
+                    KeyPosition::Left => parent_node_ref = &mut branch.left,
+                    KeyPosition::Right => parent_node_ref = &mut branch.right,
+                    KeyPosition::Adjacent(_) => return Ok(None),
                 }
-            };
-
-            // This code path is only taken if the matched_child is a ModBranch
-            // See the comment there.
-            let NodeRef::ModBranch(branch) = parent_node_ref else {
-                unreachable!("We just matched a ModBranch");
-            };
-
-            grandparent_word_idx = branch.mask.word_idx();
-
-            match key_position {
-                KeyPosition::Left => parent_node_ref = &mut branch.left,
-                KeyPosition::Right => parent_node_ref = &mut branch.right,
-                KeyPosition::Adjacent(_) => return Ok(None),
             }
-        }
+        };
+
+        // This code is the continuation of the 'leaf labeled break.
+        // At this point we know the parent_branch has the leaf we want to remove at leaf_key_position.
+        let (matched, unmatched) = match leaf_key_position {
+            KeyPosition::Left => (&mut parent_branch.left, &mut parent_branch.right),
+            KeyPosition::Right => (&mut parent_branch.right, &mut parent_branch.left),
+            KeyPosition::Adjacent(_) => return Ok(None),
+        };
+
+        let matched = mem::replace(matched, NodeRef::temp_null_stored());
+        let mut unmatched = mem::replace(unmatched, NodeRef::temp_null_stored());
+
+        let leaf_value = match matched {
+            NodeRef::ModLeaf(leaf) => {
+                debug_assert_eq!(leaf.key_hash, *key_hash);
+                leaf.value
+            }
+            NodeRef::Stored(stored_idx) => {
+                let node = data_store.get_node(stored_idx).map_err(|e| {
+                    format!(
+                        "Error in `remove_node` at {file}:{line}:{column}: could not get stored node: {e}",
+                        file = file!(),
+                        line = line!(),
+                        column = column!(),
+                    )
+                })?;
+
+                match node {
+                    Node::Leaf(leaf) => {
+                        debug_assert_eq!(leaf.key_hash, *key_hash);
+                        leaf.value.clone()
+                    }
+                    _ => unreachable!("We just matched a leaf"),
+                }
+            }
+            NodeRef::ModBranch(_) => unreachable!("We are in the leaf labeled break"),
+        };
+
+        Self::adjust_sibling_prefix(
+            data_store,
+            &mut unmatched,
+            parent_branch,
+            grandparent_word_idx,
+        )?;
+
+        *parent_node_ref = mem::replace(&mut unmatched, NodeRef::temp_null_stored());
+
+        Ok(Some(leaf_value))
     }
 
     // This method adds the parent's prefix and prior_word to the unmatched_child if needed.
