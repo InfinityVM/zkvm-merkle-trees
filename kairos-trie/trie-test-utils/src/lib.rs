@@ -128,9 +128,6 @@ pub fn run_against_snapshot_builder(
     let mut txn = Transaction::from_snapshot_builder(builder);
 
     for op in batch {
-        // FIXME: remove
-        // txn.print_modified_tree();
-        // eprintln!("{:?}\n\n\n", op);
         let (old, new) = trie_op(op, &mut txn);
         let (old_hm, new_hm) = hashmap_op(op, hash_map);
         assert_eq!(old, old_hm);
@@ -138,9 +135,6 @@ pub fn run_against_snapshot_builder(
     }
 
     let new_root_hash = txn.commit(&mut DigestHasher::<Sha256>::default()).unwrap();
-    // FIXME: remove
-    // eprintln!("\n\nHERE");
-    // txn.print_modified_tree();
     let snapshot = txn.build_initial_snapshot();
     (new_root_hash, snapshot)
 }
@@ -314,7 +308,6 @@ pub fn end_to_end_entry_ops(batches: Vec<Vec<Operation>>) {
     let mut hash_map = HashMap::new();
 
     for batch in batches.iter() {
-        // eprintln!("Batch size: {}", batch.len());
         // We build a snapshot on the server.
         let (new_root_hash, snapshot) =
             run_against_snapshot_builder(batch, prior_root_hash, db.clone(), &mut hash_map);
@@ -333,7 +326,6 @@ pub fn end_to_end_entry_ops(batches: Vec<Vec<Operation>>) {
 
     // Check that the trie and the hashmap are in sync
     for (k, v) in hash_map.iter() {
-        // dbg!(k, v);
         let ret_v = txn.get(k).unwrap().unwrap();
         assert_eq!(v, ret_v);
     }

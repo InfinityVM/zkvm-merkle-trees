@@ -510,10 +510,6 @@ impl<V> Branch<NodeRef<V>> {
 
                 debug_assert!(self.mask.word_idx() > self.prefix.len());
 
-                // dbg!(word_idx);
-                // dbg!(self.mask.word_idx());
-                // dbg!(prefix_start_idx);
-                // dbg!(&self.prefix);
                 let word_idx_in_prefix = word_idx - prefix_start_idx;
 
                 let new_prefix: Box<[u32]> =
@@ -538,16 +534,9 @@ impl<V> Branch<NodeRef<V>> {
                     );
                 }
 
-                // dbg!(word_idx_in_prefix);
-                // dbg!(&new_prefix);
-                // dbg!(&old_prefix);
-
-                // dbg!(leaf.key_hash.0);
                 let branch_word = self.prefix[word_idx_in_prefix];
                 let leaf_word = leaf.key_hash.0[word_idx];
 
-                // dbg!(branch_word);
-                // dbg!(leaf_word);
                 debug_assert!(branch_word != leaf_word);
                 let mask = BranchMask::new(word_idx as u32, branch_word, leaf_word);
 
