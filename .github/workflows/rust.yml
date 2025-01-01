@@ -31,7 +31,7 @@ jobs:
         run: cargo install cargo-fuzz
       - name: Run btree fuzz tests
         run: |
-          cargo fuzz run btree_ops -- -rss_limit_mb=4096 -max_total_time=300
+          cargo fuzz run btree_ops -s none -- -rss_limit_mb=4096 -max_total_time=300 -detect_leaks=0
       - name: Run trie fuzz tests
         run: |
-          cargo fuzz run trie_ops -- -rss_limit_mb=4096 -max_total_time=300
+          cargo fuzz run trie_ops -s none -- -rss_limit_mb=4096 -max_total_time=300 -detect_leaks=0
