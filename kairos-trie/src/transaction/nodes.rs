@@ -160,13 +160,18 @@ impl<'s, V> StoredLeafRef<'s, V> {
     }
 }
 
+/// The `BranchMask` is used to determine the position of a key relative to a branch.
+/// See `Branch::key_position`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct BranchMask {
     /// The index of the discriminant bit in the 256 bit hash key.
     pub bit_idx: u32,
 
-    /// Common prefix of word at `bit_idx / 32`, a 0 discriminant bit, and trailing 0s
+    /// Common prefix of the word of the keys under this branch.
+    /// This is the word of the key at index `bit_idx / 32` with a 0 discriminant bit, and trailing 0s.
+    /// The right branch will have a 1 as the discriminant bit.
+    /// All keys under this branch will have the same prefix up to the discriminant bit.
     pub left_prefix: u32,
 }
 
@@ -296,7 +301,6 @@ pub struct Branch<NR> {
     pub prior_word: u32,
     /// The the segment of the hash key from the parent branch to `prior_word`.
     /// Will be empty if the parent_branch.mask.bit_idx / 32 ==  self.mask.bit_idx / 32.
-    /// TODO switch to Vec
     pub prefix: Vec<u32>,
 }
 
