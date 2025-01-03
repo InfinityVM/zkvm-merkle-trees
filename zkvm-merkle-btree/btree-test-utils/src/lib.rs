@@ -103,7 +103,7 @@ pub fn run_against_snapshot_builder(
     let mut txn = MerkleBTreeTxn::new_snapshot_builder_txn(old_root_hash, db);
 
     for op in batch {
-        let (old, new) = trie_op(op, &mut txn);
+        let (old, new) = merkle_btree_op(op, &mut txn);
         let (old_bt, new_bt) = btree_op(op, btree);
         assert_eq!(old, old_bt);
         assert_eq!(new, new_bt);
@@ -135,7 +135,7 @@ pub fn run_against_snapshot(
 
     // Apply the operations to the transaction
     for op in batch {
-        trie_op(op, &mut txn);
+        merkle_btree_op(op, &mut txn);
     }
 
     // Calculate the new root hash
@@ -148,7 +148,7 @@ pub fn run_against_snapshot(
     assert_eq!(root_hash, new_root_hash);
 }
 
-fn trie_op<S: Store<Key = u32, Value = u32>>(
+fn merkle_btree_op<S: Store<Key = u32, Value = u32>>(
     op: &Operation,
     txn: &mut MerkleBTreeTxn<S>,
 ) -> (Option<u32>, Option<u32>) {
