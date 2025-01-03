@@ -25,6 +25,7 @@ pub type NodeHash = [u8; 32];
 ///
 /// The keys are sorted in ascending order.
 /// The keys partition the children greater or equal to the key go right.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeRep<K, NR> {
     // TODO consider using a sparse array to avoid needless copying

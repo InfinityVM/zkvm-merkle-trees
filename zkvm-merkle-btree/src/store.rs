@@ -1,5 +1,6 @@
 use alloc::{rc::Rc, sync::Arc};
 use core::fmt::{Debug, Display};
+use std::ops::{Deref, Index};
 
 use kairos_trie::{PortableHash, PortableHasher};
 
@@ -90,5 +91,45 @@ impl<S: Store> Store for Arc<S> {
         hash_idx: Idx,
     ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
+    }
+}
+
+pub trait StoreProperties {
+    type NodePtr<T>: NodePtr<T>;
+    type Vector<T>: Index<usize> + Clone;
+}
+
+pub trait NodePtr<T>: Clone + AsRef<T> + Deref<Target = T> {
+    fn new(v: T) -> Self;
+    fn make_mut(&mut self) -> &mut T;
+}
+
+impl<T: Clone> NodePtr<T> for Box<T> {
+    fn new(v: T) -> Self {
+        Box::new(v)
+    }
+
+    fn make_mut(&mut self) -> &mut T {
+        self
+    }
+}
+
+impl<T: Clone> NodePtr<T> for Rc<T> {
+    fn new(v: T) -> Self {
+        Rc::new(v)
+    }
+
+    fn make_mut(&mut self) -> &mut T {
+        Rc::make_mut(self)
+    }
+}
+
+impl<T: Clone> NodePtr<T> for Arc<T> {
+    fn new(v: T) -> Self {
+        Arc::new(v)
+    }
+
+    fn make_mut(&mut self) -> &mut T {
+        Arc::make_mut(self)
     }
 }
