@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use core::{cmp, mem};
+use core::mem;
 
 use arrayvec::ArrayVec;
 use kairos_trie::{PortableHash, PortableHasher};
@@ -189,8 +189,10 @@ impl<S: Store> MerkleBTreeTxn<S> {
 
             match node {
                 InnerOuter::Inner(node) => {
+                    // This invariant on inner nodes ensures Err(idx) is a valid index in children.
+                    debug_assert!(node.keys.len() == node.children.len() - 1);
                     let idx = match node.keys.binary_search(key) {
-                        Ok(idx) | Err(idx) => cmp::min(idx, node.children.len() - 1),
+                        Ok(idx) | Err(idx) => idx,
                     };
 
                     stored_idx = node.children[idx]
@@ -288,6 +290,8 @@ impl<S: Store> MerkleBTreeTxn<S> {
         key: S::Key,
         value: S::Value,
     ) -> Result<Insert_<S::Key, S::Value>, S::Error> {
+        // This invariant on inner nodes ensures Err(idx) is a valid index in children.
+        debug_assert!(parent_node.keys.len() == parent_node.children.len() - 1);
         let idx = match parent_node.keys.binary_search(&key) {
             Ok(equal_key_idx) => equal_key_idx,
             Err(idx) => idx,
@@ -391,8 +395,10 @@ impl<S: Store> MerkleBTreeTxn<S> {
         parent_node: &mut InnerNode<S::Key, S::Value>,
         key: &S::Key,
     ) -> Result<Remove<S>, S::Error> {
+        // This invariant on inner nodes ensures Err(idx) is a valid index in children.
+        debug_assert!(parent_node.keys.len() == parent_node.children.len() - 1);
         let idx = match parent_node.keys.binary_search(key) {
-            Ok(idx) | Err(idx) => cmp::min(idx, parent_node.children.len() - 1),
+            Ok(idx) | Err(idx) => idx,
         };
 
         match &mut parent_node.children[idx] {

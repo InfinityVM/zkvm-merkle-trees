@@ -960,11 +960,6 @@ impl<S: Store> Transaction<S> {
                     indent,
                     branch.mask.prefix_discriminant_mask()
                 );
-                // println!(
-                //     "{}      trailing_bits_mask: {:032b}",
-                //     indent,
-                //     branch.mask.trailing_bits_mask()
-                // );
                 println!("{}  prior_word: {:032b},", indent, branch.prior_word);
                 println!(
                     "{}  prefix: [{}],",
