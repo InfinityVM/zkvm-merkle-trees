@@ -43,7 +43,7 @@ impl<H: digest::Digest> PortableUpdate for DigestHasher<H> {
     }
 }
 
-/// `std::portable_hash::portable_Hash` is not portable across platforms.
+/// `std::hash::Hash` is not portable across platforms.
 /// Implement this trait for a type that can be hashed in a portable way.
 ///
 /// Note:
