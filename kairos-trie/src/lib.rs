@@ -15,7 +15,7 @@ pub use errors::TrieError;
 pub use hash::{DigestHasher, PortableHash, PortableHasher, PortableUpdate};
 pub use stored::{
     merkle::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
-    Store,
+    DatabaseGet, DatabaseSet, Store,
 };
 pub use transaction::{
     nodes::{Branch, Leaf, Node, TrieRoot},

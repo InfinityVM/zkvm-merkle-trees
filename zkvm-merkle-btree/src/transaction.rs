@@ -7,8 +7,7 @@ use kairos_trie::{PortableHash, PortableHasher};
 use crate::{
     db::{DatabaseGet, DatabaseSet},
     node::{
-        InnerNode, InnerOuter, LeafNode, NodeHash, NodeRefType, NodeRep, BTREE_ORDER,
-        EMPTY_TREE_ROOT_HASH,
+        InnerNode, InnerOuter, LeafNode, Node, NodeHash, NodeRef, BTREE_ORDER, EMPTY_TREE_ROOT_HASH,
     },
     snapshot::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
     store::{Idx, Store},
@@ -17,7 +16,7 @@ use crate::{
 /// A transaction against a merkle b+tree.
 pub struct MerkleBTreeTxn<S: Store> {
     pub data_store: S,
-    current_root: Option<NodeRefType<S::Key, S::Value>>,
+    current_root: Option<NodeRef<S::Key, S::Value>>,
 }
 
 impl<S: Store> MerkleBTreeTxn<S> {
@@ -48,7 +47,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
         match &self.current_root {
             // We allow two versions of an empty tree as an optimization to reuse the allocated memory.
             None => Ok(EMPTY_TREE_ROOT_HASH),
-            Some(NodeRefType::Leaf(leaf)) if leaf.keys.is_empty() => Ok(EMPTY_TREE_ROOT_HASH),
+            Some(NodeRef::Leaf(leaf)) if leaf.keys.is_empty() => Ok(EMPTY_TREE_ROOT_HASH),
 
             Some(node_ref) => Self::calc_root_hash_node(
                 #[cfg(debug_assertions)]
@@ -67,7 +66,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
         #[cfg(debug_assertions)] depth: usize,
         hasher: &mut impl PortableHasher<32>,
         data_store: &S,
-        node_ref: &NodeRefType<S::Key, S::Value>,
+        node_ref: &NodeRef<S::Key, S::Value>,
         on_modified_leaf: &mut impl FnMut(
             &NodeHash,
             &LeafNode<S::Key, S::Value>,
@@ -79,7 +78,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
         ) -> Result<(), S::Error>,
     ) -> Result<NodeHash, S::Error> {
         match node_ref {
-            NodeRefType::Inner(node) => {
+            NodeRef::Inner(node) => {
                 const MAX_CHILDREN: usize = BTREE_ORDER * 2;
                 debug_assert!(MAX_CHILDREN == InnerNode::<S::Key, S::Value>::max_children());
                 #[cfg(debug_assertions)]
@@ -114,14 +113,14 @@ impl<S: Store> MerkleBTreeTxn<S> {
 
                 Ok(hash)
             }
-            NodeRefType::Leaf(leaf) => {
+            NodeRef::Leaf(leaf) => {
                 #[cfg(debug_assertions)]
                 {
                     leaf.assert_leaf_invariants();
                     debug_assert!(leaf.keys.len() == leaf.children.len());
                     debug_assert!(
                         depth == 0
-                            || leaf.children.len() >= NodeRep::<S::Key, S::Value>::min_children()
+                            || leaf.children.len() >= Node::<S::Key, S::Value>::min_children()
                     );
                 }
 
@@ -132,19 +131,19 @@ impl<S: Store> MerkleBTreeTxn<S> {
 
                 Ok(hash)
             }
-            NodeRefType::Stored(stored_idx) => data_store.calc_subtree_hash(hasher, *stored_idx),
+            NodeRef::Stored(stored_idx) => data_store.calc_subtree_hash(hasher, *stored_idx),
         }
     }
 
     pub fn get(&self, key: &S::Key) -> Result<Option<&S::Value>, S::Error> {
         match &self.current_root {
             None => Ok(None),
-            Some(NodeRefType::Inner(node)) => Self::get_inner(&self.data_store, node, key),
-            Some(NodeRefType::Leaf(leaf)) => match leaf.keys.binary_search(key) {
+            Some(NodeRef::Inner(node)) => Self::get_inner(&self.data_store, node, key),
+            Some(NodeRef::Leaf(leaf)) => match leaf.keys.binary_search(key) {
                 Ok(idx) => Ok(Some(&leaf.children[idx])),
                 Err(_) => Ok(None),
             },
-            Some(NodeRefType::Stored(idx)) => Self::get_stored(&self.data_store, *idx, key),
+            Some(NodeRef::Stored(idx)) => Self::get_stored(&self.data_store, *idx, key),
         }
     }
 
@@ -164,14 +163,14 @@ impl<S: Store> MerkleBTreeTxn<S> {
             };
 
             match &parent_node.children[idx] {
-                NodeRefType::Inner(child) => {
+                NodeRef::Inner(child) => {
                     parent_node = child;
                 }
-                NodeRefType::Leaf(leaf) => match leaf.keys.binary_search(key) {
+                NodeRef::Leaf(leaf) => match leaf.keys.binary_search(key) {
                     Ok(idx) => return Ok(Some(&leaf.children[idx])),
                     Err(_) => return Ok(None),
                 },
-                NodeRefType::Stored(idx) => {
+                NodeRef::Stored(idx) => {
                     return Self::get_stored(data_store, *idx, key);
                 }
             }
@@ -208,26 +207,23 @@ impl<S: Store> MerkleBTreeTxn<S> {
     pub fn insert(&mut self, key: S::Key, value: S::Value) -> Result<Option<S::Value>, S::Error> {
         let (middle_key, new_right): (
             S::Key,
-            InnerOuter<
-                Arc<NodeRep<S::Key, NodeRefType<S::Key, S::Value>>>,
-                Arc<NodeRep<S::Key, S::Value>>,
-            >,
+            InnerOuter<Arc<Node<S::Key, NodeRef<S::Key, S::Value>>>, Arc<Node<S::Key, S::Value>>>,
         ) = 'handle_split: {
             match &mut self.current_root {
                 None => {
-                    self.current_root = Some(NodeRefType::Leaf(Arc::new(NodeRep {
+                    self.current_root = Some(NodeRef::Leaf(Arc::new(Node {
                         keys: ArrayVec::from_iter([key]),
                         children: ArrayVec::from_iter([value]),
                     })));
 
                     return Ok(None);
                 }
-                Some(NodeRefType::Stored(stored_idx)) => {
+                Some(NodeRef::Stored(stored_idx)) => {
                     let node = self.data_store.get(*stored_idx)?.into();
                     self.current_root = Some(node);
                     return self.insert(key, value);
                 }
-                Some(NodeRefType::Inner(node)) => {
+                Some(NodeRef::Inner(node)) => {
                     let node = Arc::make_mut(node);
 
                     match Self::insert_inner(&self.data_store, node, key, value)? {
@@ -239,7 +235,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
                         } => break 'handle_split (middle_key, InnerOuter::Inner(right_node)),
                     }
                 }
-                Some(NodeRefType::Leaf(leaf)) => {
+                Some(NodeRef::Leaf(leaf)) => {
                     let leaf = Arc::make_mut(leaf);
                     match leaf.keys.binary_search(&key) {
                         Ok(idx) => {
@@ -262,14 +258,14 @@ impl<S: Store> MerkleBTreeTxn<S> {
         // A split occurred
         let left_node = mem::replace(
             &mut self.current_root,
-            Some(NodeRefType::Inner(Arc::new(InnerNode {
+            Some(NodeRef::Inner(Arc::new(InnerNode {
                 keys: ArrayVec::from_iter([middle_key]),
                 children: ArrayVec::new(),
             }))),
         );
 
         match &mut self.current_root {
-            Some(NodeRefType::Inner(node)) => {
+            Some(NodeRef::Inner(node)) => {
                 let node = Arc::make_mut(node);
                 // Only a empty tree could have a null root node
                 node.children.push(left_node.unwrap());
@@ -302,13 +298,13 @@ impl<S: Store> MerkleBTreeTxn<S> {
             // We do this hideous nested labels to satisfy the borrow checker.
             let (middle_key, new_right) = 'handle_split: {
                 match &mut parent_node.children[idx] {
-                    NodeRefType::Stored(stored_idx) => {
+                    NodeRef::Stored(stored_idx) => {
                         let node = data_store.get(*stored_idx)?.into();
 
                         parent_node.children[idx] = node;
                         continue 'handle_stored;
                     }
-                    NodeRefType::Inner(child) => {
+                    NodeRef::Inner(child) => {
                         match Self::insert_inner(data_store, Arc::make_mut(child), key, value)? {
                             Insert_::SplitNode {
                                 middle_key,
@@ -317,7 +313,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
                             r => return Ok(r),
                         }
                     }
-                    NodeRefType::Leaf(leaf) => {
+                    NodeRef::Leaf(leaf) => {
                         let leaf = Arc::make_mut(leaf);
                         match leaf.keys.binary_search(&key) {
                             Ok(idx) => {
@@ -354,12 +350,12 @@ impl<S: Store> MerkleBTreeTxn<S> {
     pub fn remove(&mut self, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
         match &mut self.current_root {
             None => Ok(None),
-            Some(NodeRefType::Stored(stored_idx)) => {
+            Some(NodeRef::Stored(stored_idx)) => {
                 let node = self.data_store.get(*stored_idx)?.into();
                 self.current_root = Some(node);
                 self.remove(key)
             }
-            Some(NodeRefType::Inner(node)) => {
+            Some(NodeRef::Inner(node)) => {
                 let node = Arc::make_mut(node);
                 match Self::remove_inner(&self.data_store, node, key)? {
                     Remove::NotPresent => Ok(None),
@@ -375,7 +371,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     }
                 }
             }
-            Some(NodeRefType::Leaf(leaf)) => {
+            Some(NodeRef::Leaf(leaf)) => {
                 let leaf = Arc::make_mut(leaf);
                 match leaf.keys.binary_search(key) {
                     Ok(idx) => {
@@ -402,7 +398,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
         };
 
         match &mut parent_node.children[idx] {
-            NodeRefType::Inner(child) => {
+            NodeRef::Inner(child) => {
                 let child = Arc::make_mut(child);
                 match Self::remove_inner(data_store, child, key)? {
                     Remove::NotPresent => Ok(Remove::NotPresent),
@@ -412,14 +408,14 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     }
                 }
             }
-            NodeRefType::Leaf(leaf) => {
+            NodeRef::Leaf(leaf) => {
                 let leaf = Arc::make_mut(leaf);
                 match leaf.keys.binary_search(key) {
                     Ok(leaf_idx) => {
                         let value = leaf.children.remove(leaf_idx);
                         leaf.keys.remove(leaf_idx);
 
-                        if leaf.children.len() < NodeRep::<S::Key, S::Value>::min_children() {
+                        if leaf.children.len() < Node::<S::Key, S::Value>::min_children() {
                             Self::handle_underflow(data_store, parent_node, idx, value)
                         } else {
                             Ok(Remove::Removed(value))
@@ -428,7 +424,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     Err(_) => Ok(Remove::NotPresent),
                 }
             }
-            NodeRefType::Stored(stored_idx) => {
+            NodeRef::Stored(stored_idx) => {
                 let node = data_store.get(*stored_idx)?.into();
                 parent_node.children[idx] = node;
 
@@ -446,10 +442,10 @@ impl<S: Store> MerkleBTreeTxn<S> {
         if let Err(()) = parent_node.merge_or_balance(idx) {
             if idx == 0 {
                 let stored_idx = parent_node.children[1].stored().unwrap();
-                parent_node.children[1] = NodeRefType::from(data_store.get(stored_idx)?);
+                parent_node.children[1] = NodeRef::from(data_store.get(stored_idx)?);
             } else {
                 let hash_idx = parent_node.children[idx - 1].stored().unwrap();
-                parent_node.children[idx - 1] = NodeRefType::from(data_store.get(hash_idx)?);
+                parent_node.children[idx - 1] = NodeRef::from(data_store.get(hash_idx)?);
             }
 
             // unwrap is fine because we just attached a stored sibling parent_node to the tree
@@ -466,28 +462,28 @@ impl<S: Store> MerkleBTreeTxn<S> {
     pub fn first_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
         let mut node = match &self.current_root {
             None => return Ok(None),
-            Some(NodeRefType::Inner(node)) => node,
-            Some(NodeRefType::Leaf(leaf)) => {
+            Some(NodeRef::Inner(node)) => node,
+            Some(NodeRef::Leaf(leaf)) => {
                 if leaf.keys.is_empty() {
                     return Ok(None);
                 } else {
                     return Ok(Some((&leaf.keys[0], &leaf.children[0])));
                 }
             }
-            Some(NodeRefType::Stored(stored_idx)) => {
+            Some(NodeRef::Stored(stored_idx)) => {
                 return self.first_key_value_stored(*stored_idx);
             }
         };
 
         loop {
             match &node.children[0] {
-                NodeRefType::Inner(child) => {
+                NodeRef::Inner(child) => {
                     node = child;
                 }
-                NodeRefType::Leaf(leaf) => {
+                NodeRef::Leaf(leaf) => {
                     return Ok(Some((&leaf.keys[0], &leaf.children[0])));
                 }
-                NodeRefType::Stored(stored_idx) => {
+                NodeRef::Stored(stored_idx) => {
                     return self.first_key_value_stored(*stored_idx);
                 }
             }
@@ -515,8 +511,8 @@ impl<S: Store> MerkleBTreeTxn<S> {
     pub fn last_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
         let mut node = match &self.current_root {
             None => return Ok(None),
-            Some(NodeRefType::Inner(node)) => node,
-            Some(NodeRefType::Leaf(leaf)) => {
+            Some(NodeRef::Inner(node)) => node,
+            Some(NodeRef::Leaf(leaf)) => {
                 if leaf.keys.is_empty() {
                     return Ok(None);
                 } else {
@@ -526,23 +522,23 @@ impl<S: Store> MerkleBTreeTxn<S> {
                     )));
                 }
             }
-            Some(NodeRefType::Stored(stored_idx)) => {
+            Some(NodeRef::Stored(stored_idx)) => {
                 return self.last_key_value_stored(*stored_idx);
             }
         };
 
         loop {
             match &node.children[node.keys.len()] {
-                NodeRefType::Inner(child) => {
+                NodeRef::Inner(child) => {
                     node = child;
                 }
-                NodeRefType::Leaf(leaf) => {
+                NodeRef::Leaf(leaf) => {
                     return Ok(Some((
                         leaf.keys.last().unwrap(),
                         leaf.children.last().unwrap(),
                     )));
                 }
-                NodeRefType::Stored(stored_idx) => {
+                NodeRef::Stored(stored_idx) => {
                     return self.last_key_value_stored(*stored_idx);
                 }
             }
@@ -585,7 +581,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
         } else {
             Self {
                 data_store: SnapshotBuilder::new(root, db),
-                current_root: Some(NodeRefType::Stored(0)),
+                current_root: Some(NodeRef::Stored(0)),
             }
         }
     }
@@ -593,7 +589,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
     pub fn from_snapshot_builder_txn(snapshot_builder: SnapshotBuilder<K, V, Db>) -> Self {
         Self {
             data_store: snapshot_builder,
-            current_root: Some(NodeRefType::Stored(0)),
+            current_root: Some(NodeRef::Stored(0)),
         }
     }
 
@@ -643,7 +639,7 @@ impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, 
             &mut |hash: &NodeHash,
                   node: &InnerNode<K, V>,
                   child_hashes: &ArrayVec<_, { BTREE_ORDER * 2 }>| {
-                let node = InnerOuter::Inner(NodeRep {
+                let node = InnerOuter::Inner(Node {
                     keys: node.keys.clone(),
                     children: ArrayVec::from_iter(child_hashes.iter().cloned()),
                 });

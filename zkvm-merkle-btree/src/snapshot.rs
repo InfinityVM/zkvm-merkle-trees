@@ -4,7 +4,7 @@ use core::cell::RefCell;
 use imbl::Vector;
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::node::{LeafNode, NodeRefType, NodeRep};
+use crate::node::{LeafNode, Node, NodeRef};
 use crate::{
     db::DatabaseGet,
     node::{
@@ -113,7 +113,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> VerifiedSnapshot<S> {
     }
 
     #[inline]
-    pub(crate) fn root_node_ref(&self) -> Option<NodeRefType<S::Key, S::Value>> {
+    pub(crate) fn root_node_ref(&self) -> Option<NodeRef<S::Key, S::Value>> {
         let snapshot = self.snapshot.as_ref();
         snapshot
             .root_node_ref()
@@ -205,15 +205,15 @@ pub struct Snapshot<K, V> {
 impl<K, V> Snapshot<K, V> {
     /// Checks that the number of branches, leaves, and unvisited nodes could be a valid snapshot.
     /// This does not check that the snapshot represents a valid merkle tree.
-    fn root_node_ref(&self) -> Result<Option<NodeRefType<K, V>>, &'static str> {
+    fn root_node_ref(&self) -> Result<Option<NodeRef<K, V>>, &'static str> {
         match (
             self.branches.as_ref(),
             self.leaves.as_ref(),
             self.unvisited_nodes.as_ref(),
         ) {
             ([], [], []) => Ok(None),
-            ([.., _], _, _) => Ok(Some(NodeRefType::Stored(self.branches.len() as Idx - 1))),
-            ([], [_], []) | ([], [], [_]) => Ok(Some(NodeRefType::Stored(0))),
+            ([.., _], _, _) => Ok(Some(NodeRef::Stored(self.branches.len() as Idx - 1))),
+            ([], [_], []) | ([], [], [_]) => Ok(Some(NodeRef::Stored(0))),
             _ => Err("ill-formed snapshot"),
         }
     }
@@ -384,7 +384,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
                         .collect();
 
                     inner.nodes[hash_idx as usize].1 =
-                        Some(InnerOuterSnapshotArc::Inner(Arc::new(NodeRep {
+                        Some(InnerOuterSnapshotArc::Inner(Arc::new(Node {
                             keys: node.keys,
                             children,
                         })));
@@ -423,7 +423,7 @@ struct SnapshotBuilderFold<K, V> {
     leaf_count: u32,
     /// The count of unvisited nodes that will be in the snapshot
     unvisited_count: u32,
-    branches: Vec<NodeRep<K, Idx>>,
+    branches: Vec<Node<K, Idx>>,
     leaves: Vec<LeafNode<K, V>>,
     unvisited_nodes: Vec<NodeHash>,
 }
@@ -455,7 +455,7 @@ impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
     }
 
     #[inline]
-    fn push_branch(&mut self, branch: NodeRep<K, Idx>) -> Idx {
+    fn push_branch(&mut self, branch: Node<K, Idx>) -> Idx {
         let idx = self.branches.len() as Idx;
         self.branches.push(branch);
         idx
@@ -488,7 +488,7 @@ impl<K: Clone, V: Clone> SnapshotBuilderFold<K, V> {
                     .map(|child_idx| self.fold(*child_idx))
                     .collect();
 
-                self.push_branch(NodeRep { keys, children })
+                self.push_branch(Node { keys, children })
             }
             // We could remove the clone by taking ownership of the SnapshotBuilder.
             // However, given this only runs on the server we can afford the clone.

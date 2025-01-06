@@ -27,7 +27,7 @@ pub type NodeHash = [u8; 32];
 /// The keys partition the children greater or equal to the key go right.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeRep<K, NR> {
+pub struct Node<K, NR> {
     // TODO consider using a sparse array to avoid needless copying
     /// An Inner Node has at most `BTREE_ORDER * 2 - 1` keys.
     /// A node with the same number of keys and children is a leaf node.
@@ -35,13 +35,13 @@ pub struct NodeRep<K, NR> {
     pub children: ArrayVec<NR, { BTREE_ORDER * 2 }>,
 }
 
-pub type InnerNode<K, V> = NodeRep<K, NodeRefType<K, V>>;
-pub type LeafNode<K, V> = NodeRep<K, V>;
+pub type InnerNode<K, V> = Node<K, NodeRef<K, V>>;
+pub type LeafNode<K, V> = Node<K, V>;
 
-pub type InnerNodeSnapshot<K> = NodeRep<K, Idx>;
+pub type InnerNodeSnapshot<K> = Node<K, Idx>;
 
 // TODO consider making these specialized for inner and outer nodes
-impl<K, V> NodeRep<K, V> {
+impl<K, V> Node<K, V> {
     pub const fn is_full(&self) -> bool {
         self.children.len() == Self::max_children()
     }
@@ -94,7 +94,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
 
             Insert_::Inserted
         } else {
-            let mut new_right_inner = NodeRep {
+            let mut new_right_inner = Node {
                 keys: self.keys.drain((Self::min_keys() + 1)..).collect(),
                 children: self.children.drain(Self::min_children()..).collect(),
             };
@@ -159,7 +159,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
 
         match (left, underflowed, right) {
             // Try to merge left then right
-            (Some(NodeRefType::Leaf(left)), NodeRefType::Leaf(underflowed), _)
+            (Some(NodeRef::Leaf(left)), NodeRef::Leaf(underflowed), _)
                 if left.can_leafs_be_merged(underflowed) =>
             {
                 let left = Arc::make_mut(left);
@@ -170,7 +170,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
                 Ok(())
             }
 
-            (_, NodeRefType::Leaf(underflowed), Some(NodeRefType::Leaf(right)))
+            (_, NodeRef::Leaf(underflowed), Some(NodeRef::Leaf(right)))
                 if underflowed.can_leafs_be_merged(right) =>
             {
                 let underflowed = Arc::make_mut(underflowed);
@@ -182,7 +182,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
             }
 
             // Try to balance left then right
-            (Some(NodeRefType::Leaf(left)), NodeRefType::Leaf(underflowed), _) => {
+            (Some(NodeRef::Leaf(left)), NodeRef::Leaf(underflowed), _) => {
                 let left = Arc::make_mut(left);
                 let underflowed = Arc::make_mut(underflowed);
                 let middle_key = left.balance_leafs(underflowed);
@@ -190,7 +190,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
                 Ok(())
             }
 
-            (_, NodeRefType::Leaf(underflowed), Some(NodeRefType::Leaf(right))) => {
+            (_, NodeRef::Leaf(underflowed), Some(NodeRef::Leaf(right))) => {
                 let underflowed = Arc::make_mut(underflowed);
                 let right = Arc::make_mut(right);
                 let middle_key = underflowed.balance_leafs(right);
@@ -199,7 +199,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
             }
 
             // Try to merge InnerNodes left then right
-            (Some(NodeRefType::Inner(left)), NodeRefType::Inner(underflowed), _)
+            (Some(NodeRef::Inner(left)), NodeRef::Inner(underflowed), _)
                 if left.can_inner_nodes_be_merged(underflowed) =>
             {
                 let left = Arc::make_mut(left);
@@ -210,7 +210,7 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
                 Ok(())
             }
 
-            (_, NodeRefType::Inner(underflowed), Some(NodeRefType::Inner(right)))
+            (_, NodeRef::Inner(underflowed), Some(NodeRef::Inner(right)))
                 if underflowed.can_inner_nodes_be_merged(right) =>
             {
                 let underflowed = Arc::make_mut(underflowed);
@@ -222,14 +222,14 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
             }
 
             // Try to balance InnerNodes left then right
-            (Some(NodeRefType::Inner(left)), NodeRefType::Inner(underflowed), _) => {
+            (Some(NodeRef::Inner(left)), NodeRef::Inner(underflowed), _) => {
                 let left = Arc::make_mut(left);
                 let underflowed = Arc::make_mut(underflowed);
                 left.balance_inner_nodes(&mut self.keys[underflow_idx - 1], underflowed);
                 Ok(())
             }
 
-            (_, NodeRefType::Inner(underflowed), Some(NodeRefType::Inner(right))) => {
+            (_, NodeRef::Inner(underflowed), Some(NodeRef::Inner(right))) => {
                 let underflowed = Arc::make_mut(underflowed);
                 let right = Arc::make_mut(right);
                 underflowed.balance_inner_nodes(&mut self.keys[underflow_idx], right);
@@ -237,8 +237,8 @@ impl<K: Clone + Ord, V: Clone> InnerNode<K, V> {
             }
 
             // We can't merge or balance with stored nodes
-            (Some(NodeRefType::Stored(_)) | None, _, Some(NodeRefType::Stored(_)))
-            | (Some(NodeRefType::Stored(_)), _, None) => Err(()),
+            (Some(NodeRef::Stored(_)) | None, _, Some(NodeRef::Stored(_)))
+            | (Some(NodeRef::Stored(_)), _, None) => Err(()),
 
             _ => unreachable!("An InnerNode should only have one type of children"),
         }
@@ -342,7 +342,7 @@ impl<K: Clone + Ord, V> LeafNode<K, V> {
         #[cfg(debug_assertions)]
         self.assert_leaf_invariants();
 
-        let mut new_right_leaf = NodeRep {
+        let mut new_right_leaf = Node {
             keys: self.keys.drain((Self::min_children())..).collect(),
             children: self.children.drain(Self::min_children()..).collect(),
         };
@@ -443,7 +443,7 @@ impl<K: Clone + Ord, V> LeafNode<K, V> {
     }
 }
 
-impl<K: PortableHash, V: PortableHash> PortableHash for NodeRep<K, V> {
+impl<K: PortableHash, V: PortableHash> PortableHash for Node<K, V> {
     fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
         // TODO: Add size to hash
         self.keys.iter().for_each(|key| key.portable_hash(hasher));
@@ -453,7 +453,7 @@ impl<K: PortableHash, V: PortableHash> PortableHash for NodeRep<K, V> {
     }
 }
 
-impl<K: PortableHash, NR> NodeRep<K, NR> {
+impl<K: PortableHash, NR> Node<K, NR> {
     pub fn portable_hash_iter<'l>(
         &self,
         hasher: &mut impl PortableUpdate,
@@ -471,23 +471,23 @@ pub enum InnerOuter<N, L> {
     Outer(L),
 }
 
-impl<K: Clone, V: Clone> From<InnerOuterSnapshotRef<'_, K, V>> for NodeRefType<K, V> {
+impl<K: Clone, V: Clone> From<InnerOuterSnapshotRef<'_, K, V>> for NodeRef<K, V> {
     fn from(node_or_leaf: InnerOuterSnapshotRef<K, V>) -> Self {
         match node_or_leaf {
-            InnerOuter::Outer(leaf) => NodeRefType::Leaf(Arc::new(leaf.clone())),
-            InnerOuter::Inner(node) => NodeRefType::Inner(Arc::new(NodeRep {
+            InnerOuter::Outer(leaf) => NodeRef::Leaf(Arc::new(leaf.clone())),
+            InnerOuter::Inner(node) => NodeRef::Inner(Arc::new(Node {
                 keys: node.keys.clone(),
                 children: node
                     .children
                     .iter()
-                    .map(|idx| NodeRefType::Stored(*idx))
+                    .map(|idx| NodeRef::Stored(*idx))
                     .collect(),
             })),
         }
     }
 }
 
-pub type NodeOrLeafDb<K, V> = InnerOuter<NodeRep<K, NodeHash>, LeafNode<K, V>>;
+pub type NodeOrLeafDb<K, V> = InnerOuter<Node<K, NodeHash>, LeafNode<K, V>>;
 pub type InnerOuterSnapshotRef<'a, K, V> = InnerOuter<&'a InnerNodeSnapshot<K>, &'a LeafNode<K, V>>;
 pub type InnerOuterSnapshotArc<K, V> = InnerOuter<Arc<InnerNodeSnapshot<K>>, Arc<LeafNode<K, V>>>;
 
@@ -508,40 +508,40 @@ impl<N, L> InnerOuter<N, L> {
 }
 
 #[derive(Debug, Clone)]
-pub enum NodeRefType<K, V> {
+pub enum NodeRef<K, V> {
     Inner(Arc<InnerNode<K, V>>),
     Leaf(Arc<LeafNode<K, V>>),
     Stored(Idx),
 }
 
-impl<K, V> NodeRefType<K, V> {
+impl<K, V> NodeRef<K, V> {
     pub fn inner(&self) -> Option<&Arc<InnerNode<K, V>>> {
         match self {
-            NodeRefType::Inner(node) => Some(node),
+            NodeRef::Inner(node) => Some(node),
             _ => None,
         }
     }
 
     pub fn leaf(&self) -> Option<&Arc<LeafNode<K, V>>> {
         match self {
-            NodeRefType::Leaf(leaf) => Some(leaf),
+            NodeRef::Leaf(leaf) => Some(leaf),
             _ => None,
         }
     }
 
     pub fn stored(&self) -> Option<Idx> {
         match self {
-            NodeRefType::Stored(idx) => Some(*idx),
+            NodeRef::Stored(idx) => Some(*idx),
             _ => None,
         }
     }
 }
 
-impl<K, V> From<InnerOuter<Arc<InnerNode<K, V>>, Arc<LeafNode<K, V>>>> for NodeRefType<K, V> {
+impl<K, V> From<InnerOuter<Arc<InnerNode<K, V>>, Arc<LeafNode<K, V>>>> for NodeRef<K, V> {
     fn from(node_or_leaf: InnerOuter<Arc<InnerNode<K, V>>, Arc<LeafNode<K, V>>>) -> Self {
         match node_or_leaf {
-            InnerOuter::Inner(node) => NodeRefType::Inner(node),
-            InnerOuter::Outer(leaf) => NodeRefType::Leaf(leaf),
+            InnerOuter::Inner(node) => NodeRef::Inner(node),
+            InnerOuter::Outer(leaf) => NodeRef::Leaf(leaf),
         }
     }
 }
@@ -561,7 +561,7 @@ mod test {
             keys in proptest::collection::vec(0u32..100, 1..(BTREE_ORDER * 2 - 1)),
             child_hashes in proptest::collection::vec(any::<[u8; 32]>(), 2..(BTREE_ORDER * 2)),
         ) {
-            let node_with_hashes = NodeRep {
+            let node_with_hashes = Node {
                 keys: ArrayVec::from_iter(keys.clone()),
                 children: ArrayVec::from_iter(child_hashes.clone()),
             };

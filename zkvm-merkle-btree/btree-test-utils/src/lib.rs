@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, rc::Rc};
 use proptest::{prelude::*, sample::SizeRange};
 
 use sha2::Sha256;
-use zkvm_merkle_btree::{db::MemoryDb, prelude::*};
+use zkvm_merkle_btree::{db::MemoryDb, *};
 
 #[derive(Debug, Clone, Copy, arbitrary::Arbitrary)]
 pub enum Operation {
