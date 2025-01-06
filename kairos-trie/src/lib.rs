@@ -14,7 +14,7 @@ mod transaction;
 pub use errors::TrieError;
 pub use hash::{DigestHasher, PortableHash, PortableHasher, PortableUpdate};
 pub use stored::{
-    merkle::{Snapshot, VerifiedSnapshot},
+    merkle::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
     Store,
 };
 pub use transaction::{
