@@ -13,6 +13,10 @@ mod transaction;
 
 pub use errors::TrieError;
 pub use hash::{DigestHasher, PortableHash, PortableHasher, PortableUpdate};
+pub use stored::{
+    merkle::{Snapshot, VerifiedSnapshot},
+    Store,
+};
 pub use transaction::{
     nodes::{Branch, Leaf, Node, TrieRoot},
     Entry, OccupiedEntry, Transaction, VacantEntry, VacantEntryEmptyTrie,
