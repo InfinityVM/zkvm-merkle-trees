@@ -13,5 +13,5 @@ pub use crate::db::{DatabaseGet, DatabaseSet};
 pub use crate::node::{InnerOuter, Node, NodeHash, NodeOrLeafDb};
 pub use crate::snapshot::{Snapshot, SnapshotBuilder, VerifiedSnapshot};
 pub use crate::store::Store;
-pub use crate::transaction::MerkleBTreeTxn;
+pub use crate::transaction::Transaction;
 pub use kairos_trie::{DigestHasher, PortableHash, PortableHasher, PortableUpdate};

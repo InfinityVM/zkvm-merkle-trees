@@ -100,7 +100,7 @@ pub fn run_against_snapshot_builder(
     db: Rc<MemoryDb<u32, u32>>,
     btree: &mut BTreeMap<u32, u32>,
 ) -> (NodeHash, Snapshot<u32, u32>) {
-    let mut txn = MerkleBTreeTxn::new_snapshot_builder_txn(old_root_hash, db);
+    let mut txn = Transaction::new_snapshot_builder_txn(old_root_hash, db);
 
     for op in batch {
         let (old, new) = merkle_btree_op(op, &mut txn);
@@ -131,7 +131,7 @@ pub fn run_against_snapshot(
 
     // Create a transaction against the snapshot at the old root hash
     // let mut txn = MerkleBTreeTxn::from_verified_snapshot(verified_snapshot);
-    let mut txn = MerkleBTreeTxn::from_verified_snapshot_ref(&verified_snapshot);
+    let mut txn = Transaction::from_verified_snapshot_ref(&verified_snapshot);
 
     // Apply the operations to the transaction
     for op in batch {
@@ -150,7 +150,7 @@ pub fn run_against_snapshot(
 
 fn merkle_btree_op<S: Store<Key = u32, Value = u32>>(
     op: &Operation,
-    txn: &mut MerkleBTreeTxn<S>,
+    txn: &mut Transaction<S>,
 ) -> (Option<u32>, Option<u32>) {
     match op {
         Operation::Insert(key, value) => {
@@ -224,7 +224,7 @@ pub fn end_to_end_ops(batches: Vec<Vec<Operation>>) {
     }
 
     // After all batches are applied, the B-tree and the btree should be in sync
-    let txn = MerkleBTreeTxn::new_snapshot_builder_txn(prior_root_hash, db);
+    let txn = Transaction::new_snapshot_builder_txn(prior_root_hash, db);
 
     // Check that the B-tree and the btree are in sync
     for (k, v) in btree.iter() {

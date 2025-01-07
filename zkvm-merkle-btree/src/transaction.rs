@@ -14,12 +14,13 @@ use crate::{
 };
 
 /// A transaction against a merkle b+tree.
-pub struct MerkleBTreeTxn<S: Store> {
+#[derive(Clone)]
+pub struct Transaction<S: Store> {
     pub data_store: S,
     current_root: Option<NodeRef<S::Key, S::Value>>,
 }
 
-impl<S: Store> MerkleBTreeTxn<S> {
+impl<S: Store> Transaction<S> {
     /// Calculate the root hash of the trie.
     ///
     /// Caller must ensure that the hasher is reset before calling this method.
@@ -568,7 +569,7 @@ impl<S: Store> MerkleBTreeTxn<S> {
 }
 
 impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>>
-    MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
+    Transaction<SnapshotBuilder<K, V, Db>>
 {
     pub fn new_snapshot_builder_txn(root: NodeHash, db: Db) -> Self {
         debug_assert!(EMPTY_TREE_ROOT_HASH == NodeHash::default());
@@ -605,11 +606,11 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
     }
 }
 
-impl<'s, S: Store + AsRef<Snapshot<S::Key, S::Value>>> MerkleBTreeTxn<&'s VerifiedSnapshot<S>> {
+impl<'s, S: Store + AsRef<Snapshot<S::Key, S::Value>>> Transaction<&'s VerifiedSnapshot<S>> {
     /// Create a `Transaction` from a borrowed `VerifiedSnapshot`.
     #[inline]
     pub fn from_verified_snapshot_ref(snapshot: &'s VerifiedSnapshot<S>) -> Self {
-        MerkleBTreeTxn {
+        Transaction {
             current_root: snapshot.root_node_ref(),
             data_store: snapshot,
         }
@@ -617,7 +618,7 @@ impl<'s, S: Store + AsRef<Snapshot<S::Key, S::Value>>> MerkleBTreeTxn<&'s Verifi
 }
 
 impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, V>>
-    MerkleBTreeTxn<SnapshotBuilder<K, V, Db>>
+    Transaction<SnapshotBuilder<K, V, Db>>
 {
     /// Write modified nodes to the database and return the root hash.
     /// Calling this method will write all modified nodes to the database.
@@ -677,7 +678,7 @@ mod test {
 
     use proptest::prelude::*;
 
-    use crate::{db::MemoryDb, transaction::MerkleBTreeTxn};
+    use crate::{db::MemoryDb, transaction::Transaction};
 
     #[derive(Clone, Debug)]
     enum Op {
@@ -690,7 +691,7 @@ mod test {
 
     fn run_operations(operations: Vec<Op>) {
         let mut txn_btree =
-            MerkleBTreeTxn::new_snapshot_builder_txn(Default::default(), MemoryDb::default());
+            Transaction::new_snapshot_builder_txn(Default::default(), MemoryDb::default());
         let mut std_btree = BTreeMap::new();
 
         for op in operations {
