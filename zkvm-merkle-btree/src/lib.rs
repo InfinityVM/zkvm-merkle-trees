@@ -10,7 +10,7 @@ pub mod store;
 pub mod transaction;
 
 pub use crate::db::{DatabaseGet, DatabaseSet};
-pub use crate::node::{Node, NodeHash};
+pub use crate::node::{InnerOuter, Node, NodeHash, NodeOrLeafDb};
 pub use crate::snapshot::{Snapshot, SnapshotBuilder, VerifiedSnapshot};
 pub use crate::store::Store;
 pub use crate::transaction::MerkleBTreeTxn;
