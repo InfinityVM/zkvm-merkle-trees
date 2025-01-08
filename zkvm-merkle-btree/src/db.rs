@@ -1,10 +1,13 @@
 use alloc::{collections::BTreeMap, rc::Rc, sync::Arc};
-use core::{cell::RefCell, fmt::Display};
+use core::{
+    cell::RefCell,
+    fmt::{Debug, Display},
+};
 
 use crate::node::{NodeHash, NodeOrLeafDb};
 
 pub trait DatabaseGet<K, V> {
-    type GetError: Display;
+    type GetError: Display + Debug;
 
     fn get(&self, hash: &NodeHash) -> Result<NodeOrLeafDb<K, V>, Self::GetError>;
 }
@@ -19,7 +22,7 @@ impl<K, V, D: DatabaseGet<K, V>> DatabaseGet<K, V> for &D {
 }
 
 pub trait DatabaseSet<K, V>: DatabaseGet<K, V> {
-    type SetError: Display;
+    type SetError: Display + Debug;
 
     fn set(&self, hash: &NodeHash, node: NodeOrLeafDb<K, V>) -> Result<(), Self::SetError>;
 }

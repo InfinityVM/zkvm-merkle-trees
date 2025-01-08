@@ -1,10 +1,12 @@
 use alloc::{string::String, sync::Arc};
-use core::cell::RefCell;
+use core::{cell::RefCell, convert::Infallible};
 
 use imbl::Vector;
 use kairos_trie::{PortableHash, PortableHasher};
 
+use crate::error::BTreeErr;
 use crate::node::{LeafNode, Node, NodeRef};
+use crate::DatabaseSet;
 use crate::{
     db::DatabaseGet,
     node::{
@@ -122,7 +124,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> VerifiedSnapshot<S> {
 }
 
 impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S> {
-    type Error = String;
+    type Error = BTreeErr<Infallible, Infallible>;
     type Key = S::Key;
     type Value = S::Value;
 
@@ -145,11 +147,16 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
         } else if let Some(hash) = snapshot.unvisited_nodes.get(idx - unvisited_offset) {
             Ok(*hash)
         } else {
-            Err(format!(
-                "Invalid arg: node {} does not exist\n\
+            Err(BTreeErr::StoreError(
+                format!(
+                    "Invalid arg: node {} does not exist\n\
                 Snapshot has {} nodes",
-                idx,
-                snapshot.branches.len() + snapshot.leaves.len() + snapshot.unvisited_nodes.len(),
+                    idx,
+                    snapshot.branches.len()
+                        + snapshot.leaves.len()
+                        + snapshot.unvisited_nodes.len(),
+                )
+                .into_boxed_str(),
             ))
         }
     }
@@ -171,16 +178,24 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
             .get(idx - unvisited_offset)
             .is_some()
         {
-            Err(format!(
-                "Invalid arg: node {idx} is unvisited\n\
+            Err(BTreeErr::StoreError(
+                format!(
+                    "Invalid arg: node {idx} is unvisited\n\
                 get can only return visited nodes"
+                )
+                .into_boxed_str(),
             ))
         } else {
-            Err(format!(
-                "Invalid arg: node {} does not exist\n\
+            Err(BTreeErr::StoreError(
+                format!(
+                    "Invalid arg: node {} does not exist\n\
                 Snapshot has {} nodes",
-                idx,
-                snapshot.branches.len() + snapshot.leaves.len() + snapshot.unvisited_nodes.len(),
+                    idx,
+                    snapshot.branches.len()
+                        + snapshot.leaves.len()
+                        + snapshot.unvisited_nodes.len(),
+                )
+                .into_boxed_str(),
             ))
         }
     }
@@ -226,7 +241,8 @@ impl<K, V> AsRef<Snapshot<K, V>> for Snapshot<K, V> {
 }
 
 impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<K, V> {
-    type Error = String;
+    // A snapshot has no DB thus DB Errors are Infallible
+    type Error = BTreeErr<Infallible, Infallible>;
     type Key = K;
     type Value = V;
 
@@ -235,7 +251,7 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
         _hasher: &mut impl PortableHasher<32>,
         _hash_idx: Idx,
     ) -> Result<NodeHash, Self::Error> {
-        // split calc and get into two traits
+        // TODO: split calc and get into two traits
         unimplemented!("Use VerifiedSnapshot to calculate the hash of a snapshot")
     }
 
@@ -253,16 +269,22 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
             .get(idx - self.branches.len())
             .is_some()
         {
-            Err(format!(
-                "Invalid arg: node {idx} is unvisited\n\
+            Err(BTreeErr::StoreError(
+                format!(
+                    "Invalid arg: node {idx} is unvisited\n\
                 get can only return visited nodes"
+                )
+                .into_boxed_str(),
             ))
         } else {
-            Err(format!(
-                "Invalid arg: node {} does not exist\n\
+            Err(BTreeErr::StoreError(
+                format!(
+                    "Invalid arg: node {} does not exist\n\
                 Snapshot has {} nodes",
-                idx,
-                self.branches.len() + self.leaves.len() + self.unvisited_nodes.len(),
+                    idx,
+                    self.branches.len() + self.leaves.len() + self.unvisited_nodes.len(),
+                )
+                .into_boxed_str(),
             ))
         }
     }
@@ -334,10 +356,13 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder
     }
 }
 
-impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>> Store
-    for SnapshotBuilder<K, V, Db>
+impl<K, V, Db> Store for SnapshotBuilder<K, V, Db>
+where
+    K: Ord + Clone + PortableHash,
+    V: Clone + PortableHash,
+    Db: DatabaseGet<K, V> + DatabaseSet<K, V>,
 {
-    type Error = String;
+    type Error = BTreeErr<Db::GetError, Db::SetError>;
     type Key = K;
     type Value = V;
 
@@ -356,7 +381,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
         let (node_hash, _) = inner
             .nodes
             .get(hash_idx as usize)
-            .ok_or("Hash Index out of bounds")?;
+            .ok_or(BTreeErr::StoreError("Hash Index out of bounds".into()))?;
 
         Ok(*node_hash)
     }
@@ -366,8 +391,8 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
         let (hash, unread) = inner
             .nodes
             .get(hash_idx as usize)
-            .ok_or("Index out of bounds")
-            .map(|(hash, node_or_leaf_opt)| (*hash, node_or_leaf_opt.is_none()))?;
+            .map(|(hash, node_or_leaf_opt)| (*hash, node_or_leaf_opt.is_none()))
+            .ok_or(BTreeErr::StoreError("Index out of bounds".into()))?;
 
         if unread {
             let newly_read = self.db.get(&hash).map_err(|e| e.to_string())?;

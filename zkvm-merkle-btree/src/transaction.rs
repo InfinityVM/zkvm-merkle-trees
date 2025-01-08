@@ -6,6 +6,7 @@ use kairos_trie::{PortableHash, PortableHasher};
 
 use crate::{
     db::{DatabaseGet, DatabaseSet},
+    error::BTreeErr,
     node::{
         InnerNode, InnerOuter, LeafNode, Node, NodeHash, NodeRef, BTREE_ORDER, EMPTY_TREE_ROOT_HASH,
     },
@@ -568,8 +569,11 @@ impl<S: Store> Transaction<S> {
     }
 }
 
-impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>>
-    Transaction<SnapshotBuilder<K, V, Db>>
+impl<K, V, Db> Transaction<SnapshotBuilder<K, V, Db>>
+where
+    K: Ord + Clone + PortableHash,
+    V: Clone + PortableHash,
+    Db: DatabaseGet<K, V> + DatabaseSet<K, V>,
 {
     pub fn new_snapshot_builder_txn(root: NodeHash, db: Db) -> Self {
         debug_assert!(EMPTY_TREE_ROOT_HASH == NodeHash::default());
@@ -628,12 +632,15 @@ impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, 
     ///
     /// Caller must ensure that the hasher is reset before calling this method.
     #[inline]
-    pub fn commit(&self, hasher: &mut impl PortableHasher<32>) -> Result<NodeHash, String> where {
+    pub fn commit(
+        &self,
+        hasher: &mut impl PortableHasher<32>,
+    ) -> Result<NodeHash, <SnapshotBuilder<K, V, Db> as Store>::Error> {
         let on_modified_leaf = &mut |hash: &NodeHash, leaf: &LeafNode<K, V>| {
             self.data_store
                 .db
                 .set(hash, InnerOuter::Outer(leaf.clone()))
-                .map_err(|e| e.to_string())
+                .map_err(BTreeErr::DbSetError)
         };
 
         let on_modified_branch =
@@ -648,7 +655,7 @@ impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, 
                 self.data_store
                     .db
                     .set(hash, node)
-                    .map_err(|e| e.to_string())
+                    .map_err(BTreeErr::DbSetError)
             };
 
         self.calc_root_hash_inner(hasher, on_modified_leaf, on_modified_branch)
