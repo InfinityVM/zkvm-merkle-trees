@@ -29,7 +29,7 @@ impl<S: Store> Transaction<S> {
     pub fn calc_root_hash(
         &self,
         hasher: &mut impl PortableHasher<32>,
-    ) -> Result<NodeHash, S::Error> {
+    ) -> Result<NodeHash, BTreeErr<S::DbGetError, S::DbSetError>> {
         self.calc_root_hash_inner(hasher, &mut |_, _| Ok(()), &mut |_, _, _| Ok(()))
     }
 
@@ -39,13 +39,14 @@ impl<S: Store> Transaction<S> {
         on_modified_leaf: &mut impl FnMut(
             &NodeHash,
             &LeafNode<S::Key, S::Value>,
-        ) -> Result<(), S::Error>,
+        ) -> Result<(), BTreeErr<S::DbGetError, S::DbSetError>>,
         on_modified_branch: &mut impl FnMut(
             &NodeHash,
             &InnerNode<S::Key, S::Value>,
             &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
-        ) -> Result<(), S::Error>,
-    ) -> Result<NodeHash, S::Error> {
+        )
+            -> Result<(), BTreeErr<S::DbGetError, S::DbSetError>>,
+    ) -> Result<NodeHash, BTreeErr<S::DbGetError, S::DbSetError>> {
         match &self.current_root {
             // We allow two versions of an empty tree as an optimization to reuse the allocated memory.
             None => Ok(EMPTY_TREE_ROOT_HASH),
@@ -72,13 +73,14 @@ impl<S: Store> Transaction<S> {
         on_modified_leaf: &mut impl FnMut(
             &NodeHash,
             &LeafNode<S::Key, S::Value>,
-        ) -> Result<(), S::Error>,
+        ) -> Result<(), BTreeErr<S::DbGetError, S::DbSetError>>,
         on_modified_branch: &mut impl FnMut(
             &NodeHash,
             &InnerNode<S::Key, S::Value>,
             &ArrayVec<NodeHash, { BTREE_ORDER * 2 }>,
-        ) -> Result<(), S::Error>,
-    ) -> Result<NodeHash, S::Error> {
+        )
+            -> Result<(), BTreeErr<S::DbGetError, S::DbSetError>>,
+    ) -> Result<NodeHash, BTreeErr<S::DbGetError, S::DbSetError>> {
         match node_ref {
             NodeRef::Inner(node) => {
                 const MAX_CHILDREN: usize = BTREE_ORDER * 2;
@@ -137,7 +139,10 @@ impl<S: Store> Transaction<S> {
         }
     }
 
-    pub fn get(&self, key: &S::Key) -> Result<Option<&S::Value>, S::Error> {
+    pub fn get(
+        &self,
+        key: &S::Key,
+    ) -> Result<Option<&S::Value>, BTreeErr<S::DbGetError, S::DbSetError>> {
         match &self.current_root {
             None => Ok(None),
             Some(NodeRef::Inner(node)) => Self::get_inner(&self.data_store, node, key),
@@ -157,7 +162,7 @@ impl<S: Store> Transaction<S> {
         data_store: &'s S,
         mut parent_node: &'s InnerNode<S::Key, S::Value>,
         key: &S::Key,
-    ) -> Result<Option<&'s S::Value>, S::Error> {
+    ) -> Result<Option<&'s S::Value>, BTreeErr<S::DbGetError, S::DbSetError>> {
         loop {
             let idx = match parent_node.keys.binary_search(key) {
                 Ok(equal_key_idx) => equal_key_idx,
@@ -184,7 +189,7 @@ impl<S: Store> Transaction<S> {
         data_store: &'s S,
         mut stored_idx: Idx,
         key: &S::Key,
-    ) -> Result<Option<&'s S::Value>, S::Error> {
+    ) -> Result<Option<&'s S::Value>, BTreeErr<S::DbGetError, S::DbSetError>> {
         loop {
             let node = data_store.get(stored_idx)?;
 
@@ -206,7 +211,11 @@ impl<S: Store> Transaction<S> {
         }
     }
 
-    pub fn insert(&mut self, key: S::Key, value: S::Value) -> Result<Option<S::Value>, S::Error> {
+    pub fn insert(
+        &mut self,
+        key: S::Key,
+        value: S::Value,
+    ) -> Result<Option<S::Value>, BTreeErr<S::DbGetError, S::DbSetError>> {
         let (middle_key, new_right): (
             S::Key,
             InnerOuter<Arc<Node<S::Key, NodeRef<S::Key, S::Value>>>, Arc<Node<S::Key, S::Value>>>,
@@ -287,7 +296,7 @@ impl<S: Store> Transaction<S> {
         parent_node: &'s mut InnerNode<S::Key, S::Value>,
         key: S::Key,
         value: S::Value,
-    ) -> Result<Insert_<S::Key, S::Value>, S::Error> {
+    ) -> Result<Insert_<S::Key, S::Value>, BTreeErr<S::DbGetError, S::DbSetError>> {
         // This invariant on inner nodes ensures Err(idx) is a valid index in children.
         debug_assert!(parent_node.keys.len() == parent_node.children.len() - 1);
         let idx = match parent_node.keys.binary_search(&key) {
@@ -349,7 +358,10 @@ impl<S: Store> Transaction<S> {
         }
     }
 
-    pub fn remove(&mut self, key: &S::Key) -> Result<Option<S::Value>, S::Error> {
+    pub fn remove(
+        &mut self,
+        key: &S::Key,
+    ) -> Result<Option<S::Value>, BTreeErr<S::DbGetError, S::DbSetError>> {
         match &mut self.current_root {
             None => Ok(None),
             Some(NodeRef::Stored(stored_idx)) => {
@@ -392,7 +404,7 @@ impl<S: Store> Transaction<S> {
         data_store: &S,
         parent_node: &mut InnerNode<S::Key, S::Value>,
         key: &S::Key,
-    ) -> Result<Remove<S>, S::Error> {
+    ) -> Result<Remove<S>, BTreeErr<S::DbGetError, S::DbSetError>> {
         // This invariant on inner nodes ensures Err(idx) is a valid index in children.
         debug_assert!(parent_node.keys.len() == parent_node.children.len() - 1);
         let idx = match parent_node.keys.binary_search(key) {
@@ -440,7 +452,7 @@ impl<S: Store> Transaction<S> {
         parent_node: &mut InnerNode<S::Key, S::Value>,
         idx: usize,
         value: S::Value,
-    ) -> Result<Remove<S>, S::Error> {
+    ) -> Result<Remove<S>, BTreeErr<S::DbGetError, S::DbSetError>> {
         if let Err(()) = parent_node.merge_or_balance(idx) {
             if idx == 0 {
                 let stored_idx = parent_node.children[1].stored().unwrap();
@@ -461,7 +473,9 @@ impl<S: Store> Transaction<S> {
         }
     }
 
-    pub fn first_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+    pub fn first_key_value(
+        &self,
+    ) -> Result<Option<(&S::Key, &S::Value)>, BTreeErr<S::DbGetError, S::DbSetError>> {
         let mut node = match &self.current_root {
             None => return Ok(None),
             Some(NodeRef::Inner(node)) => node,
@@ -495,7 +509,7 @@ impl<S: Store> Transaction<S> {
     fn first_key_value_stored(
         &self,
         mut stored_idx: Idx,
-    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+    ) -> Result<Option<(&S::Key, &S::Value)>, BTreeErr<S::DbGetError, S::DbSetError>> {
         loop {
             let node = self.data_store.get(stored_idx)?;
 
@@ -510,7 +524,9 @@ impl<S: Store> Transaction<S> {
         }
     }
 
-    pub fn last_key_value(&self) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+    pub fn last_key_value(
+        &self,
+    ) -> Result<Option<(&S::Key, &S::Value)>, BTreeErr<S::DbGetError, S::DbSetError>> {
         let mut node = match &self.current_root {
             None => return Ok(None),
             Some(NodeRef::Inner(node)) => node,
@@ -550,7 +566,7 @@ impl<S: Store> Transaction<S> {
     fn last_key_value_stored(
         &self,
         mut stored_idx: Idx,
-    ) -> Result<Option<(&S::Key, &S::Value)>, S::Error> {
+    ) -> Result<Option<(&S::Key, &S::Value)>, BTreeErr<S::DbGetError, S::DbSetError>> {
         loop {
             let node = self.data_store.get(stored_idx)?;
 
@@ -635,7 +651,13 @@ impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, 
     pub fn commit(
         &self,
         hasher: &mut impl PortableHasher<32>,
-    ) -> Result<NodeHash, <SnapshotBuilder<K, V, Db> as Store>::Error> {
+    ) -> Result<
+        NodeHash,
+        BTreeErr<
+            <SnapshotBuilder<K, V, Db> as Store>::DbGetError,
+            <SnapshotBuilder<K, V, Db> as Store>::DbSetError,
+        >,
+    > {
         let on_modified_leaf = &mut |hash: &NodeHash, leaf: &LeafNode<K, V>| {
             self.data_store
                 .db

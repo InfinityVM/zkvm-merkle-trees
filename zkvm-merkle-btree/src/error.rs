@@ -8,9 +8,7 @@ pub enum BTreeErr<DbGetError, DbSetError> {
     /// Maybe it's being used with a different tree.
     /// Something went very wrong.
     StoreError(Box<str>),
-    /// The database failed to get a Node or Leaf.
     DbGetError(DbGetError),
-    /// The database failed to set a Node or Leaf.
     DbSetError(DbSetError),
 }
 
@@ -25,7 +23,9 @@ impl<DbGetError: Display, DbSetError: Display> Display for BTreeErr<DbGetError, 
     }
 }
 
-impl<DbGetError, DbSetError> From<String> for BTreeErr<DbGetError, DbSetError> {
+impl<DbGetError: From<String>, DbSetError: From<String>> From<String>
+    for BTreeErr<DbGetError, DbSetError>
+{
     #[inline]
     fn from(s: String) -> Self {
         Self::StoreError(s.into_boxed_str())
