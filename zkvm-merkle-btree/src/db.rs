@@ -69,9 +69,23 @@ impl<K, V, D: DatabaseSet<K, V>> DatabaseSet<K, V> for Arc<D> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct MemoryDb<K, V> {
     leaves: RefCell<BTreeMap<NodeHash, NodeOrLeafDb<K, V>>>,
+}
+
+impl<K, V> MemoryDb<K, V> {
+    pub fn new() -> Self {
+        Self {
+            leaves: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<K, V> Default for MemoryDb<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K: Clone, V: Clone> DatabaseGet<K, V> for MemoryDb<K, V> {
