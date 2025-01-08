@@ -4,16 +4,12 @@ use std::ops::{Deref, Index};
 
 use kairos_trie::{PortableHash, PortableHasher};
 
-use crate::{
-    error::BTreeErr,
-    node::{InnerOuterSnapshotRef, NodeHash},
-};
+use crate::node::{InnerOuterSnapshotRef, NodeHash};
 
 pub type Idx = u32;
 
 pub trait Store {
-    type DbGetError: Display + Debug;
-    type DbSetError: Display + Debug;
+    type Error: Display + Debug;
     type Key: Ord + Clone + PortableHash;
     type Value: Clone + PortableHash;
 
@@ -21,20 +17,16 @@ pub trait Store {
         &self,
         hasher: &mut impl PortableHasher<32>,
         hash_idx: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>>;
+    ) -> Result<NodeHash, Self::Error>;
 
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<
-        InnerOuterSnapshotRef<'_, Self::Key, Self::Value>,
-        BTreeErr<Self::DbGetError, Self::DbSetError>,
-    >;
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error>;
 }
 
 impl<S: Store> Store for &S {
-    type DbGetError = S::DbGetError;
-    type DbSetError = S::DbSetError;
+    type Error = S::Error;
     type Key = S::Key;
     type Value = S::Value;
 
@@ -43,7 +35,7 @@ impl<S: Store> Store for &S {
         &self,
         hasher: &mut impl PortableHasher<32>,
         hash_idx: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    ) -> Result<NodeHash, Self::Error> {
         (**self).calc_subtree_hash(hasher, hash_idx)
     }
 
@@ -51,17 +43,13 @@ impl<S: Store> Store for &S {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<
-        InnerOuterSnapshotRef<'_, Self::Key, Self::Value>,
-        BTreeErr<Self::DbGetError, Self::DbSetError>,
-    > {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
     }
 }
 
 impl<S: Store> Store for Rc<S> {
-    type DbGetError = S::DbGetError;
-    type DbSetError = S::DbSetError;
+    type Error = S::Error;
     type Key = S::Key;
     type Value = S::Value;
 
@@ -70,7 +58,7 @@ impl<S: Store> Store for Rc<S> {
         &self,
         hasher: &mut impl PortableHasher<32>,
         hash_idx: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    ) -> Result<NodeHash, Self::Error> {
         (**self).calc_subtree_hash(hasher, hash_idx)
     }
 
@@ -78,17 +66,13 @@ impl<S: Store> Store for Rc<S> {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<
-        InnerOuterSnapshotRef<'_, Self::Key, Self::Value>,
-        BTreeErr<Self::DbGetError, Self::DbSetError>,
-    > {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
     }
 }
 
 impl<S: Store> Store for Arc<S> {
-    type DbGetError = S::DbGetError;
-    type DbSetError = S::DbSetError;
+    type Error = S::Error;
     type Key = S::Key;
     type Value = S::Value;
 
@@ -97,7 +81,7 @@ impl<S: Store> Store for Arc<S> {
         &self,
         hasher: &mut impl PortableHasher<32>,
         hash_idx: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    ) -> Result<NodeHash, Self::Error> {
         (**self).calc_subtree_hash(hasher, hash_idx)
     }
 
@@ -105,10 +89,7 @@ impl<S: Store> Store for Arc<S> {
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<
-        InnerOuterSnapshotRef<'_, Self::Key, Self::Value>,
-        BTreeErr<Self::DbGetError, Self::DbSetError>,
-    > {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         (**self).get(hash_idx)
     }
 }

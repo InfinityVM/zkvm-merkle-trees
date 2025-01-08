@@ -124,8 +124,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> VerifiedSnapshot<S> {
 }
 
 impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S> {
-    type DbGetError = Infallible;
-    type DbSetError = Infallible;
+    type Error = BTreeErr<Infallible, Infallible>;
     type Key = S::Key;
     type Value = S::Value;
 
@@ -134,7 +133,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
         &self,
         _: &mut impl PortableHasher<32>,
         node: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    ) -> Result<NodeHash, Self::Error> {
         let snapshot = self.snapshot.as_ref();
 
         let idx = node as usize;
@@ -163,13 +162,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
     }
 
     #[inline]
-    fn get(
-        &self,
-        idx: Idx,
-    ) -> Result<
-        InnerOuterSnapshotRef<Self::Key, Self::Value>,
-        BTreeErr<Self::DbGetError, Self::DbSetError>,
-    > {
+    fn get(&self, idx: Idx) -> Result<InnerOuterSnapshotRef<Self::Key, Self::Value>, Self::Error> {
         let snapshot = self.snapshot.as_ref();
 
         let idx = idx as usize;
@@ -249,8 +242,7 @@ impl<K, V> AsRef<Snapshot<K, V>> for Snapshot<K, V> {
 
 impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<K, V> {
     // A snapshot has no DB thus DB Errors are Infallible
-    type DbGetError = Infallible;
-    type DbSetError = Infallible;
+    type Error = BTreeErr<Infallible, Infallible>;
     type Key = K;
     type Value = V;
 
@@ -258,7 +250,7 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
         &self,
         _hasher: &mut impl PortableHasher<32>,
         _hash_idx: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    ) -> Result<NodeHash, Self::Error> {
         // TODO: split calc and get into two traits
         unimplemented!("Use VerifiedSnapshot to calculate the hash of a snapshot")
     }
@@ -266,10 +258,7 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<
-        InnerOuterSnapshotRef<'_, Self::Key, Self::Value>,
-        BTreeErr<Self::DbGetError, Self::DbSetError>,
-    > {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
         let idx = hash_idx as usize;
         if let Some(node) = self.branches.get(idx) {
             Ok(InnerOuterSnapshotRef::Inner(node))
@@ -373,8 +362,7 @@ where
     V: Clone + PortableHash,
     Db: DatabaseGet<K, V> + DatabaseSet<K, V>,
 {
-    type DbGetError = Db::GetError;
-    type DbSetError = Db::SetError;
+    type Error = BTreeErr<Db::GetError, Db::SetError>;
     type Key = K;
     type Value = V;
 
@@ -388,7 +376,7 @@ where
         &self,
         _hasher: &mut impl PortableHasher<32>,
         hash_idx: Idx,
-    ) -> Result<NodeHash, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    ) -> Result<NodeHash, Self::Error> {
         let inner = self.inner.borrow();
         let (node_hash, _) = inner
             .nodes
@@ -398,10 +386,7 @@ where
         Ok(*node_hash)
     }
 
-    fn get(
-        &self,
-        hash_idx: Idx,
-    ) -> Result<InnerOuterSnapshotRef<K, V>, BTreeErr<Self::DbGetError, Self::DbSetError>> {
+    fn get(&self, hash_idx: Idx) -> Result<InnerOuterSnapshotRef<K, V>, Self::Error> {
         let mut inner = self.inner.borrow_mut();
         let (hash, unread) = inner
             .nodes
@@ -410,7 +395,7 @@ where
             .ok_or(BTreeErr::StoreError("Index out of bounds".into()))?;
 
         if unread {
-            let newly_read = self.db.get(&hash).map_err(|e| BTreeErr::DbGetError(e))?;
+            let newly_read = self.db.get(&hash).map_err(|e| e.to_string())?;
             match newly_read {
                 InnerOuter::Inner(node) => {
                     let children = node
