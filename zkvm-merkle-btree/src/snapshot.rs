@@ -4,6 +4,7 @@ use core::cell::RefCell;
 use imbl::Vector;
 use kairos_trie::{PortableHash, PortableHasher};
 
+use crate::errors::BTreeError;
 use crate::node::{LeafNode, Node, NodeRef};
 use crate::{
     db::DatabaseGet,
@@ -122,7 +123,6 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> VerifiedSnapshot<S> {
 }
 
 impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S> {
-    type Error = String;
     type Key = S::Key;
     type Value = S::Value;
 
@@ -131,7 +131,7 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
         &self,
         _: &mut impl PortableHasher<32>,
         node: Idx,
-    ) -> Result<NodeHash, Self::Error> {
+    ) -> Result<NodeHash, BTreeError> {
         let snapshot = self.snapshot.as_ref();
 
         let idx = node as usize;
@@ -150,12 +150,13 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
                 Snapshot has {} nodes",
                 idx,
                 snapshot.branches.len() + snapshot.leaves.len() + snapshot.unvisited_nodes.len(),
-            ))
+            )
+            .into())
         }
     }
 
     #[inline]
-    fn get(&self, idx: Idx) -> Result<InnerOuterSnapshotRef<Self::Key, Self::Value>, Self::Error> {
+    fn get(&self, idx: Idx) -> Result<InnerOuterSnapshotRef<Self::Key, Self::Value>, BTreeError> {
         let snapshot = self.snapshot.as_ref();
 
         let idx = idx as usize;
@@ -174,14 +175,16 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
             Err(format!(
                 "Invalid arg: node {idx} is unvisited\n\
                 get can only return visited nodes"
-            ))
+            )
+            .into())
         } else {
             Err(format!(
                 "Invalid arg: node {} does not exist\n\
                 Snapshot has {} nodes",
                 idx,
                 snapshot.branches.len() + snapshot.leaves.len() + snapshot.unvisited_nodes.len(),
-            ))
+            )
+            .into())
         }
     }
 }
@@ -226,7 +229,6 @@ impl<K, V> AsRef<Snapshot<K, V>> for Snapshot<K, V> {
 }
 
 impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<K, V> {
-    type Error = String;
     type Key = K;
     type Value = V;
 
@@ -234,7 +236,7 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
         &self,
         _hasher: &mut impl PortableHasher<32>,
         _hash_idx: Idx,
-    ) -> Result<NodeHash, Self::Error> {
+    ) -> Result<NodeHash, BTreeError> {
         // split calc and get into two traits
         unimplemented!("Use VerifiedSnapshot to calculate the hash of a snapshot")
     }
@@ -242,7 +244,7 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
     fn get(
         &self,
         hash_idx: Idx,
-    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, Self::Error> {
+    ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, BTreeError> {
         let idx = hash_idx as usize;
         if let Some(node) = self.branches.get(idx) {
             Ok(InnerOuterSnapshotRef::Inner(node))
@@ -256,14 +258,16 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
             Err(format!(
                 "Invalid arg: node {idx} is unvisited\n\
                 get can only return visited nodes"
-            ))
+            )
+            .into())
         } else {
             Err(format!(
                 "Invalid arg: node {} does not exist\n\
                 Snapshot has {} nodes",
                 idx,
                 self.branches.len() + self.leaves.len() + self.unvisited_nodes.len(),
-            ))
+            )
+            .into())
         }
     }
 }
@@ -337,7 +341,6 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder
 impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>> Store
     for SnapshotBuilder<K, V, Db>
 {
-    type Error = String;
     type Key = K;
     type Value = V;
 
@@ -351,7 +354,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
         &self,
         _hasher: &mut impl PortableHasher<32>,
         hash_idx: Idx,
-    ) -> Result<NodeHash, Self::Error> {
+    ) -> Result<NodeHash, BTreeError> {
         let inner = self.inner.borrow();
         let (node_hash, _) = inner
             .nodes
@@ -361,7 +364,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
         Ok(*node_hash)
     }
 
-    fn get(&self, hash_idx: Idx) -> Result<InnerOuterSnapshotRef<K, V>, Self::Error> {
+    fn get(&self, hash_idx: Idx) -> Result<InnerOuterSnapshotRef<K, V>, BTreeError> {
         let mut inner = self.inner.borrow_mut();
         let (hash, unread) = inner
             .nodes

@@ -4,6 +4,7 @@
 extern crate alloc;
 
 pub mod db;
+pub mod errors;
 pub mod node;
 pub mod snapshot;
 pub mod store;
