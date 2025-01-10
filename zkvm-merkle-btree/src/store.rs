@@ -14,6 +14,18 @@ pub trait Store {
     type Key: Ord + Clone + PortableHash;
     type Value: Clone + PortableHash;
 
+    /// Get the root node idx of the merkle b+tree in the store.
+    /// This is the root of the merkle b+tree prior to the current transaction.
+    /// It's unlikely you'll need this method, you probably want `get_store_root_hash` instead.
+    ///
+    /// None means the tree is empty.
+    fn get_store_root_idx(&self) -> Option<Idx>;
+
+    /// Get the root hash of the merkle b+tree in the store.
+    /// Note that this is not the merkle root of the current transaction.
+    /// This is the root of the merkle b+tree prior to the current transaction.
+    fn get_store_root_hash(&self) -> NodeHash;
+
     fn calc_subtree_hash(
         &self,
         hasher: &mut impl PortableHasher<32>,
@@ -29,6 +41,16 @@ pub trait Store {
 impl<S: Store> Store for &S {
     type Key = S::Key;
     type Value = S::Value;
+
+    #[inline(always)]
+    fn get_store_root_idx(&self) -> Option<Idx> {
+        (**self).get_store_root_idx()
+    }
+
+    #[inline(always)]
+    fn get_store_root_hash(&self) -> NodeHash {
+        (**self).get_store_root_hash()
+    }
 
     #[inline(always)]
     fn calc_subtree_hash(
@@ -53,6 +75,16 @@ impl<S: Store> Store for Rc<S> {
     type Value = S::Value;
 
     #[inline(always)]
+    fn get_store_root_idx(&self) -> Option<Idx> {
+        (**self).get_store_root_idx()
+    }
+
+    #[inline(always)]
+    fn get_store_root_hash(&self) -> NodeHash {
+        (**self).get_store_root_hash()
+    }
+
+    #[inline(always)]
     fn calc_subtree_hash(
         &self,
         hasher: &mut impl PortableHasher<32>,
@@ -73,6 +105,16 @@ impl<S: Store> Store for Rc<S> {
 impl<S: Store> Store for Arc<S> {
     type Key = S::Key;
     type Value = S::Value;
+
+    #[inline(always)]
+    fn get_store_root_idx(&self) -> Option<Idx> {
+        (**self).get_store_root_idx()
+    }
+
+    #[inline(always)]
+    fn get_store_root_hash(&self) -> NodeHash {
+        (**self).get_store_root_hash()
+    }
 
     #[inline(always)]
     fn calc_subtree_hash(

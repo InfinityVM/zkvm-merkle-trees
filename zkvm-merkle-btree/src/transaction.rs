@@ -22,6 +22,13 @@ pub struct Transaction<S: Store> {
 }
 
 impl<S: Store> Transaction<S> {
+    pub fn new(data_store: S) -> Self {
+        Self {
+            current_root: data_store.get_store_root_idx().map(NodeRef::Stored),
+            data_store,
+        }
+    }
+
     /// Calculate the root hash of the trie.
     ///
     /// Caller must ensure that the hasher is reset before calling this method.
@@ -588,13 +595,6 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
         }
     }
 
-    pub fn from_snapshot_builder_txn(snapshot_builder: SnapshotBuilder<K, V, Db>) -> Self {
-        Self {
-            data_store: snapshot_builder,
-            current_root: Some(NodeRef::Stored(0)),
-        }
-    }
-
     /// Builds a snapshot of the tree before the transaction.
     /// The `Snapshot` is not a complete representation of the tree.
     /// The `Snapshot` only contains information about the parts of the tree touched by the transaction.
@@ -618,9 +618,27 @@ impl<'s, S: Store + AsRef<Snapshot<S::Key, S::Value>>> Transaction<&'s VerifiedS
     }
 }
 
+impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Transaction<VerifiedSnapshot<S>> {
+    #[inline]
+    pub fn from_verified_snapshot_owned(snapshot: VerifiedSnapshot<S>) -> Self {
+        Self {
+            current_root: snapshot.root_node_ref(),
+            data_store: snapshot,
+        }
+    }
+}
+
 impl<K: Clone + PortableHash + Ord, V: Clone + PortableHash, Db: DatabaseSet<K, V>>
     Transaction<SnapshotBuilder<K, V, Db>>
 {
+    #[inline]
+    pub fn from_snapshot_builder(snapshot_builder: SnapshotBuilder<K, V, Db>) -> Self {
+        Self {
+            current_root: Some(NodeRef::Stored(0)),
+            data_store: snapshot_builder,
+        }
+    }
+
     /// Write modified nodes to the database and return the root hash.
     /// Calling this method will write all modified nodes to the database.
     /// Calling this method again will rewrite the nodes to the database.

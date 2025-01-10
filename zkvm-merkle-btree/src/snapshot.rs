@@ -29,7 +29,26 @@ pub struct VerifiedSnapshot<S: Store> {
     leaf_hashes: Box<[NodeHash]>,
 }
 
+impl<S: Store + Default> Default for VerifiedSnapshot<S> {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            snapshot: S::default(),
+            node_hashes: Box::new([]),
+            leaf_hashes: Box::new([]),
+        }
+    }
+}
+
 impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> VerifiedSnapshot<S> {
+    #[inline]
+    pub fn empty() -> Self
+    where
+        S: Default,
+    {
+        Self::default()
+    }
+
     /// Verify the snapshot by checking that it is well formed and calculating the merkle hashes of all nodes.
     /// The merkle hashes are cached such that `calc_subtree_hash` is an O(1) operation for all nodes in the snapshot.
     #[inline]
@@ -127,6 +146,17 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
     type Value = S::Value;
 
     #[inline]
+    fn get_store_root_idx(&self) -> Option<Idx> {
+        // Safety: We know the snapshot is well-formed, so the root node must be stored
+        self.root_node_ref().map(|n| n.stored().unwrap())
+    }
+
+    #[inline]
+    fn get_store_root_hash(&self) -> NodeHash {
+        self.root_hash()
+    }
+
+    #[inline]
     fn calc_subtree_hash(
         &self,
         _: &mut impl PortableHasher<32>,
@@ -205,7 +235,22 @@ pub struct Snapshot<K, V> {
     unvisited_nodes: Box<[NodeHash]>,
 }
 
+impl<K, V> Default for Snapshot<K, V> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl<K, V> Snapshot<K, V> {
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            branches: Box::new([]),
+            leaves: Box::new([]),
+            unvisited_nodes: Box::new([]),
+        }
+    }
+
     /// Checks that the number of branches, leaves, and unvisited nodes could be a valid snapshot.
     /// This does not check that the snapshot represents a valid merkle tree.
     fn root_node_ref(&self) -> Result<Option<NodeRef<K, V>>, &'static str> {
@@ -232,12 +277,21 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
     type Key = K;
     type Value = V;
 
+    fn get_store_root_idx(&self) -> Option<Idx> {
+        unimplemented!("Use VerifiedSnapshot to get the root index of a snapshot")
+    }
+
+    fn get_store_root_hash(&self) -> NodeHash {
+        // TODO: Don't implement Store for Snapshot
+        unimplemented!("Use VerifiedSnapshot to get the root hash of a snapshot")
+    }
+
     fn calc_subtree_hash(
         &self,
         _hasher: &mut impl PortableHasher<32>,
         _hash_idx: Idx,
     ) -> Result<NodeHash, BTreeError> {
-        // split calc and get into two traits
+        // TODO: split calc and get into two traits
         unimplemented!("Use VerifiedSnapshot to calculate the hash of a snapshot")
     }
 
@@ -343,6 +397,16 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
 {
     type Key = K;
     type Value = V;
+
+    #[inline]
+    fn get_store_root_idx(&self) -> Option<Idx> {
+        self.inner.borrow().nodes.is_empty().then_some(0)
+    }
+
+    #[inline]
+    fn get_store_root_hash(&self) -> NodeHash {
+        self.root_hash()
+    }
 
     /// Calculate the merkle root hash of the snapshot.
     /// This computation can be thought of as verifying a Snapshot has a particular Merkle root hash.
