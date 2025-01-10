@@ -400,7 +400,11 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
 
     #[inline]
     fn get_store_root_idx(&self) -> Option<Idx> {
-        self.inner.borrow().nodes.is_empty().then_some(0)
+        if self.inner.borrow().nodes.is_empty() {
+            None
+        } else {
+            Some(0)
+        }
     }
 
     #[inline]
