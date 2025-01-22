@@ -36,6 +36,19 @@ pub trait Store {
         &self,
         hash_idx: Idx,
     ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, BTreeError>;
+
+    fn get_stored_value<V>(&self, hash: &NodeHash) -> Result<StoredValue<V>, BTreeError>;
+}
+
+/// A value which is not stored inline, but instead stored as a hash.
+/// The hash can be used to retrieve the value from the store.
+///
+/// Using this struct requires registering serializers for the value type with the store.
+#[derive(Clone, Debug)]
+pub enum StoredValue<V> {
+    /// Unmodified value.
+    Hash(NodeHash),
+    Value(V),
 }
 
 impl<S: Store> Store for &S {
@@ -67,6 +80,11 @@ impl<S: Store> Store for &S {
         hash_idx: Idx,
     ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, BTreeError> {
         (**self).get(hash_idx)
+    }
+
+    #[inline(always)]
+    fn get_stored_value<V>(&self, hash: &NodeHash) -> Result<StoredValue<V>, BTreeError> {
+        (**self).get_stored_value(hash)
     }
 }
 
@@ -100,6 +118,11 @@ impl<S: Store> Store for Rc<S> {
     ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, BTreeError> {
         (**self).get(hash_idx)
     }
+
+    #[inline(always)]
+    fn get_stored_value<V>(&self, hash: &NodeHash) -> Result<StoredValue<V>, BTreeError> {
+        (**self).get_stored_value(hash)
+    }
 }
 
 impl<S: Store> Store for Arc<S> {
@@ -131,6 +154,11 @@ impl<S: Store> Store for Arc<S> {
         hash_idx: Idx,
     ) -> Result<InnerOuterSnapshotRef<'_, Self::Key, Self::Value>, BTreeError> {
         (**self).get(hash_idx)
+    }
+
+    #[inline(always)]
+    fn get_stored_value<V>(&self, hash: &NodeHash) -> Result<StoredValue<V>, BTreeError> {
+        (**self).get_stored_value(hash)
     }
 }
 

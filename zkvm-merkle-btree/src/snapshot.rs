@@ -1,11 +1,13 @@
 use alloc::{string::String, sync::Arc};
 use core::cell::RefCell;
+use std::any;
 
 use imbl::Vector;
 use kairos_trie::{PortableHash, PortableHasher};
 
 use crate::errors::BTreeError;
 use crate::node::{LeafNode, Node, NodeRef};
+use crate::store::StoredValue;
 use crate::{
     db::DatabaseGet,
     node::{
@@ -217,6 +219,11 @@ impl<S: Store + AsRef<Snapshot<S::Key, S::Value>>> Store for VerifiedSnapshot<S>
             .into())
         }
     }
+
+    #[inline]
+    fn get_stored_value<V>(&self, hash: &NodeHash) -> Result<StoredValue<V>, BTreeError> {
+        self.snapshot.as_ref().get_stored_value(hash)
+    }
 }
 
 /// A snapshot of the merkle B+Tree.
@@ -324,17 +331,29 @@ impl<K: Clone + Ord + PortableHash, V: Clone + PortableHash> Store for Snapshot<
             .into())
         }
     }
+
+    fn get_stored_value<SV>(&self, _hash: &NodeHash) -> Result<StoredValue<SV>, BTreeError> {
+        unimplemented!("Use VerifiedSnapshot to get the stored value of a snapshot")
+    }
 }
 
 #[derive(Clone)]
 pub struct SnapshotBuilder<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> {
     pub db: Db,
     inner: RefCell<SnapshotBuilderInner<K, V>>,
+    // TODO: consider using smallvec
+    // sub_dbs: Vec<(any::TypeId, *mut any:
 }
 
 #[derive(Clone)]
 pub struct SnapshotBuilderInner<K: Ord + Clone + PortableHash, V: Clone + PortableHash> {
     nodes: Vector<(NodeHash, Option<InnerOuterSnapshotArc<K, V>>)>,
+    /// A vector of read hashes.
+    /// TODO: consider usign Idx instead to avoid the overhead of storing hashes everywhere.
+    /// Alternatively, under planned refactoring the Idx pattern may be removed.
+    /// For now this is simple.
+    /// This may contain duplicates.
+    read_stored_values: imbl::Vector<NodeHash>,
 }
 
 impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder<K, V, Db> {
@@ -347,6 +366,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder
                 db,
                 inner: RefCell::new(SnapshotBuilderInner {
                     nodes: Vector::new(),
+                    read_stored_values: Vector::new(),
                 }),
             }
         } else {
@@ -354,6 +374,7 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db> SnapshotBuilder
                 db,
                 inner: RefCell::new(SnapshotBuilderInner {
                     nodes: Vector::from_iter([(root, None)]),
+                    read_stored_values: Vector::new(),
                 }),
             }
         }
@@ -483,6 +504,11 @@ impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, 
                 }
             }
         }
+    }
+
+    fn get_stored_value<SV>(&self, hash: &NodeHash) -> Result<StoredValue<SV>, BTreeError> {
+        let inner = self.inner.borrow();
+        todo!()
     }
 }
 

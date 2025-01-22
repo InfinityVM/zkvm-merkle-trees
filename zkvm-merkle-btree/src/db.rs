@@ -1,7 +1,13 @@
-use alloc::{collections::BTreeMap, rc::Rc, sync::Arc};
-use core::{cell::RefCell, fmt::Display};
+use alloc::{collections::BTreeMap, sync::Arc};
+use core::{any::Any, cell::RefCell, fmt::Display};
+use std::rc::Rc;
 
 use crate::node::{NodeHash, NodeOrLeafDb};
+
+pub trait DbEarsed {
+    fn get_stored_bytes(&self, hash: &NodeHash) -> Result<Arc<dyn Any>, String>;
+    fn set_stored_bytes(&self, hash: &NodeHash, value: &dyn Any) -> Result<(), String>;
+}
 
 pub trait DatabaseGet<K, V> {
     type GetError: Display;
