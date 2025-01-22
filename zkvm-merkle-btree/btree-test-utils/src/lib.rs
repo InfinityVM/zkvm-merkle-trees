@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, ops::RangeBounds, rc::Rc};
 
 use proptest::{prelude::*, sample::SizeRange};
 
@@ -12,6 +12,8 @@ pub enum Operation {
     Delete(u32),
     GetFirstKeyValue,
     GetLastKeyValue,
+    IterAll,
+    IterRange(Option<u32>, Option<u32>),
 }
 
 prop_compose! {
@@ -28,11 +30,13 @@ impl Arbitrary for Operation {
         key_range(max_key)
             .prop_flat_map(|max_key| {
                 prop_oneof![
-                    (0..=max_key, any::<u32>()).prop_map(|(k, v)| Operation::Insert(k, v)),
-                    (0..=max_key).prop_map(Operation::Get),
-                    (0..=max_key).prop_map(Operation::Delete),
-                    Just(Operation::GetFirstKeyValue),
-                    Just(Operation::GetLastKeyValue)
+                    50 => (0..=max_key, any::<u32>()).prop_map(|(k, v)| Operation::Insert(k, v)),
+                    20 => (0..=max_key).prop_map(Operation::Get),
+                    20 => (0..=max_key).prop_map(Operation::Delete),
+                    5 => Just(Operation::GetFirstKeyValue),
+                    5 => Just(Operation::GetLastKeyValue),
+                    5 => Just(Operation::IterAll),
+                    10 => (proptest::option::of(0..10000u32), proptest::option::of(0..10000u32)).prop_map(|(start, end)| Operation::IterRange(start, end)),
                 ]
             })
             .boxed()
@@ -93,24 +97,103 @@ pub fn arb_batches_inner(ops: Vec<Operation>, windows: Vec<usize>) -> Vec<Vec<Op
     batches
 }
 
+fn iter_test<S: Store<Key = u32, Value = u32>>(
+    range: impl RangeBounds<u32> + Clone,
+    txn: &Transaction<S>,
+    std: &BTreeMap<u32, u32>,
+) {
+    itertools::assert_equal(
+        txn.range(range.clone()).enumerate(),
+        std.range(range).map(Ok).enumerate(),
+    );
+}
+
 // Code like this runs in the server.
 pub fn run_against_snapshot_builder(
     batch: &[Operation],
     old_root_hash: NodeHash,
     db: Rc<MemoryDb<u32, u32>>,
-    btree: &mut BTreeMap<u32, u32>,
+    std_btree: &mut BTreeMap<u32, u32>,
 ) -> (NodeHash, Snapshot<u32, u32>) {
-    let mut txn = Transaction::new_snapshot_builder_txn(old_root_hash, db);
+    let mut txn_btree = Transaction::new_snapshot_builder_txn(old_root_hash, db);
 
     for op in batch {
-        let (old, new) = merkle_btree_op(op, &mut txn);
-        let (old_bt, new_bt) = btree_op(op, btree);
-        assert_eq!(old, old_bt);
-        assert_eq!(new, new_bt);
+        match *op {
+            Operation::Insert(k, v) => {
+                let res_txn = txn_btree.insert(k, v).unwrap();
+                let res_std = std_btree.insert(k, v);
+                assert_eq!(
+                    res_txn, res_std,
+                    "insert failed for key: {}, value: {}, merkle btree returned {:?}, btreemap returned {:?}",
+                    k, v, res_txn, res_std
+                );
+            }
+            Operation::Get(k) => {
+                let res_txn = txn_btree.get(&k).unwrap().cloned();
+                let res_std = std_btree.get(&k).cloned();
+                assert_eq!(
+                    res_txn, res_std,
+                    "get failed for key: {}, merkle btree returned {:?}, btreemap returned {:?}",
+                    k, res_txn, res_std
+                );
+            }
+            Operation::Delete(k) => {
+                let res_txn = txn_btree.remove(&k).unwrap();
+                let res_std = std_btree.remove(&k);
+                assert_eq!(
+                    res_txn, res_std,
+                    "delete failed for key: {}, merkle btree returned {:?}, btreemap returned {:?}",
+                    k, res_txn, res_std
+                );
+            }
+            Operation::GetFirstKeyValue => {
+                let res_txn = txn_btree.first_key_value().unwrap();
+                let res_std = std_btree.first_key_value();
+                assert_eq!(
+                    res_txn, res_std,
+                    "get first key value failed, merkle btree returned {:?}, btreemap returned {:?}",
+                    res_txn, res_std
+                );
+            }
+            Operation::GetLastKeyValue => {
+                let res_txn = txn_btree.last_key_value().unwrap();
+                let res_std = std_btree.last_key_value();
+                assert_eq!(
+                    res_txn, res_std,
+                    "get last key value failed, merkle btree returned {:?}, btreemap returned {:?}",
+                    res_txn, res_std
+                );
+            }
+            Operation::IterAll => {
+                itertools::assert_equal(
+                    txn_btree.iter().enumerate(),
+                    std_btree.iter().map(Ok).enumerate(),
+                );
+            }
+            Operation::IterRange(start, end) => {
+                // We slightly differ from the std btree in that we don't panic when the start is greater than the end
+                if let (Some(start), Some(end)) = (start, end) {
+                    if start > end {
+                        assert!(txn_btree.range(start..end).next().is_none());
+
+                        continue;
+                    }
+                }
+
+                match (start, end) {
+                    (Some(start), Some(end)) => iter_test(start..end, &txn_btree, std_btree),
+                    (Some(start), None) => iter_test(start.., &txn_btree, std_btree),
+                    (None, Some(end)) => iter_test(..end, &txn_btree, std_btree),
+                    (None, None) => iter_test(.., &txn_btree, std_btree),
+                };
+            }
+        }
     }
 
-    let new_root_hash = txn.commit(&mut DigestHasher::<Sha256>::default()).unwrap();
-    let snapshot = txn.build_initial_snapshot();
+    let new_root_hash = txn_btree
+        .commit(&mut DigestHasher::<Sha256>::default())
+        .unwrap();
+    let snapshot = txn_btree.build_initial_snapshot();
     (new_root_hash, snapshot)
 }
 
@@ -148,55 +231,44 @@ pub fn run_against_snapshot(
     assert_eq!(root_hash, new_root_hash);
 }
 
-fn merkle_btree_op<S: Store<Key = u32, Value = u32>>(
-    op: &Operation,
-    txn: &mut Transaction<S>,
-) -> (Option<u32>, Option<u32>) {
+fn merkle_btree_op<S: Store<Key = u32, Value = u32>>(op: &Operation, txn: &mut Transaction<S>) {
     match op {
         Operation::Insert(key, value) => {
-            let old = txn.insert(*key, *value).unwrap();
-            (old, Some(*value))
+            txn.insert(*key, *value).unwrap();
         }
         Operation::Get(key) => {
-            let value = txn.get(key).unwrap().copied();
-            (value, value)
+            txn.get(key).unwrap();
         }
         Operation::Delete(key) => {
-            let old = txn.remove(key).unwrap();
-            (old, None)
+            txn.remove(key).unwrap();
         }
         Operation::GetFirstKeyValue => {
-            let value = txn.first_key_value().unwrap().map(|(_, v)| *v);
-            (value, value)
+            txn.first_key_value().unwrap();
         }
         Operation::GetLastKeyValue => {
-            let value = txn.last_key_value().unwrap().map(|(_, v)| *v);
-            (value, value)
+            txn.last_key_value().unwrap();
         }
-    }
-}
 
-fn btree_op(op: &Operation, btree: &mut BTreeMap<u32, u32>) -> (Option<u32>, Option<u32>) {
-    match op {
-        Operation::Insert(key, value) => {
-            let old = btree.insert(*key, *value);
-            (old, Some(*value))
+        Operation::IterAll => {
+            txn.iter().for_each(|r| {
+                r.unwrap();
+            });
         }
-        Operation::Get(key) => {
-            let value = btree.get(key).copied();
-            (value, value)
-        }
-        Operation::Delete(key) => {
-            let old = btree.remove(key);
-            (old, None)
-        }
-        Operation::GetFirstKeyValue => {
-            let value = btree.first_key_value().map(|(_, v)| *v);
-            (value, value)
-        }
-        Operation::GetLastKeyValue => {
-            let value = btree.last_key_value().map(|(_, v)| *v);
-            (value, value)
+        Operation::IterRange(start, end) => {
+            match (*start, *end) {
+                (Some(start), Some(end)) => txn.range(start..end).for_each(|r| {
+                    r.unwrap();
+                }),
+                (Some(start), None) => txn.range(start..).for_each(|r| {
+                    r.unwrap();
+                }),
+                (None, Some(end)) => txn.range(..end).for_each(|r| {
+                    r.unwrap();
+                }),
+                (None, None) => txn.range::<u32, _>(..).for_each(|r| {
+                    r.unwrap();
+                }),
+            };
         }
     }
 }

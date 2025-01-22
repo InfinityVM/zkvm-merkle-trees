@@ -135,6 +135,30 @@ fn test_minimal_failing_input_3() {
     end_to_end_ops(batches);
 }
 
+#[test]
+fn test_minimal_failing_input_4() {
+    let batches = vec![
+        vec![Operation::Insert(1, 0)],
+        vec![Operation::IterRange(Some(2), None)],
+    ];
+    end_to_end_ops(batches);
+}
+
+#[test]
+fn test_minimal_input_5() {
+    let batches = vec![
+        vec![Operation::Insert(1, 0)],
+        vec![Operation::IterRange(Some(1), None)],
+    ];
+    end_to_end_ops(batches);
+}
+
+#[test]
+fn test_minimal_input_6() {
+    let batches = vec![vec![Operation::Insert(1, 0)], vec![Operation::Get(2)]];
+    end_to_end_ops(batches);
+}
+
 proptest! {
     #[test]
     fn prop_end_to_end_ops(

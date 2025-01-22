@@ -18,3 +18,4 @@ cc abc3432a7a105375833cb14e107cd69e73d2b8b38c69f25ec07acf662ba9e214 # shrinks to
 cc 0368f5182eb5dab6574134b47e35a9c212c7c893244dafea49a5ed273b23f621 # shrinks to batches = [[Insert(2, 0)], [Delete(2)], [GetFirstKeyValue]]
 cc a5f3dd59b64d9d389974dfe8a524cf47393500080a68840e0ae1a608eb3ec651 # shrinks to batch = [Insert(0, 0)]
 cc 1f3a8f8056959712204c913209bc08cf72d89884243026bf48db3966f42b090a # shrinks to batches = [[Insert(0, 0), Delete(1), Delete(1), Delete(1)]]
+cc 4af0cf1a0e80d4f7eb5c97e05f4fb2dd64357756e2fbb36a0e492dc38e85c172 # shrinks to batches = [[Insert(36, 0), Insert(0, 0), Insert(2, 0), Insert(37, 0), Insert(3, 0), Insert(4, 0), Insert(38, 0), Insert(34, 0), Insert(5, 0), Insert(39, 0), Insert(40, 0), Insert(41, 0), Insert(33, 0), Insert(1, 0), Insert(6, 0), Insert(42, 0), Insert(7, 0), Insert(43, 0), Insert(8, 0), Insert(44, 0), Insert(9, 0)], [IterRange(Some(45), None)]]

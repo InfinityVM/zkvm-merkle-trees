@@ -1,5 +1,11 @@
 use alloc::sync::Arc;
 use core::mem;
+use smallvec::SmallVec;
+use std::{
+    borrow::Borrow,
+    marker::PhantomData,
+    ops::{Bound, RangeBounds, RangeFull},
+};
 
 use arrayvec::ArrayVec;
 use kairos_trie::{PortableHash, PortableHasher};
@@ -8,7 +14,8 @@ use crate::{
     db::{DatabaseGet, DatabaseSet},
     errors::BTreeError,
     node::{
-        InnerNode, InnerOuter, LeafNode, Node, NodeHash, NodeRef, BTREE_ORDER, EMPTY_TREE_ROOT_HASH,
+        InnerNode, InnerNodeSnapshot, InnerOuter, LeafNode, Node, NodeHash, NodeRef, BTREE_ORDER,
+        EMPTY_TREE_ROOT_HASH,
     },
     snapshot::{Snapshot, SnapshotBuilder, VerifiedSnapshot},
     store::{Idx, Store},
@@ -574,6 +581,26 @@ impl<S: Store> Transaction<S> {
             }
         }
     }
+
+    pub fn range<K, R>(&self, range: R) -> Range<'_, S, K, R>
+    where
+        R: RangeBounds<K>,
+        K: Borrow<S::Key>,
+    {
+        Range {
+            txn: self,
+            range,
+            stack: SmallVec::new(),
+            current_leaf: None,
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn iter(&self) -> Iter<'_, S> {
+        Iter {
+            range: self.range(..),
+        }
+    }
 }
 
 impl<K: Ord + Clone + PortableHash, V: Clone + PortableHash, Db: DatabaseGet<K, V>>
@@ -691,13 +718,249 @@ pub enum Remove<S: Store> {
     Underflow(S::Value),
 }
 
+pub struct Iter<'s, S: Store> {
+    range: Range<'s, S, S::Key, RangeFull>,
+}
+
+impl<'s, S: Store> Iterator for Iter<'s, S> {
+    type Item = Result<(&'s S::Key, &'s S::Value), BTreeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.range.next()
+    }
+}
+
+enum StackItem<'s, S: Store> {
+    Node(&'s InnerNode<S::Key, S::Value>),
+    Stored(&'s InnerNodeSnapshot<S::Key>),
+}
+
+/// An iterator over a range of keys in the tree.
+pub struct Range<'s, S: Store, K: Borrow<S::Key>, R: RangeBounds<K>> {
+    txn: &'s Transaction<S>,
+    /// The range of keys to iterate over.
+    range: R,
+    /// The stack of nodes we have visited.
+    /// (child index descended into, parent node)
+    stack: SmallVec<[(usize, StackItem<'s, S>); 32]>,
+    /// The index key to be visited in the current leaf node,
+    /// and current leaf node we are iterating over.
+    // TODO: remove the Arc and cloning with the redesign of Store
+    current_leaf: Option<(usize, &'s LeafNode<S::Key, S::Value>)>,
+    phantom: PhantomData<K>,
+}
+
+#[allow(clippy::needless_lifetimes)]
+impl<'s, S: Store, K: Borrow<S::Key>, R: RangeBounds<K>> Range<'s, S, K, R> {
+    fn bound_to_idx<V>(&self, node: &'s Node<S::Key, V>) -> usize {
+        match self.range.start_bound() {
+            Bound::Included(key) => node.keys.binary_search(key.borrow()).unwrap_or_else(|i| i),
+            Bound::Excluded(key) => {
+                let start = key.borrow();
+                match node.keys.binary_search(start) {
+                    // If the excluded starting key is in an inner node
+                    // the all greater keys must be to the right of it
+                    Ok(i) => i + 1,
+                    Err(i) => i,
+                }
+            }
+            Bound::Unbounded => 0,
+        }
+    }
+
+    fn setup_stack(&mut self) -> Result<(), BTreeError> {
+        debug_assert!(self.stack.is_empty());
+        debug_assert!(self.current_leaf.is_none());
+
+        match &self.txn.current_root {
+            None => Ok(()),
+            Some(NodeRef::Inner(node)) => {
+                let mut parent = node;
+                loop {
+                    let idx = self.bound_to_idx(parent);
+                    self.stack.push((idx, StackItem::Node(parent)));
+
+                    match &parent.children[idx] {
+                        NodeRef::Inner(child) => {
+                            parent = child;
+                        }
+                        NodeRef::Leaf(leaf) => {
+                            let idx = self.bound_to_idx(leaf);
+                            self.current_leaf = Some((idx, leaf));
+                            return Ok(());
+                        }
+                        NodeRef::Stored(stored_idx) => {
+                            self.setup_stack_stored(*stored_idx)?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            Some(NodeRef::Leaf(leaf)) => {
+                let idx = self.bound_to_idx(leaf);
+                self.current_leaf = Some((idx, leaf));
+                Ok(())
+            }
+            Some(NodeRef::Stored(stored_idx)) => self.setup_stack_stored(*stored_idx),
+        }
+    }
+
+    fn setup_stack_stored(&mut self, mut stored_idx: Idx) -> Result<(), BTreeError> {
+        loop {
+            let Ok(node) = self.txn.data_store.get(stored_idx) else {
+                return Err(BTreeError::from("stored node not found"));
+            };
+
+            match node {
+                InnerOuter::Inner(node) => {
+                    let idx = self.bound_to_idx(node);
+                    self.stack.push((idx, StackItem::Stored(node)));
+                    stored_idx = node.children[idx];
+                }
+                InnerOuter::Outer(leaf) => {
+                    let idx = self.bound_to_idx(leaf);
+                    self.current_leaf = Some((idx, leaf));
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+impl<'s, S: Store, K: Borrow<S::Key>, R: RangeBounds<K>> Iterator for Range<'s, S, K, R> {
+    type Item = Result<(&'s S::Key, &'s S::Value), BTreeError>;
+
+    // The question mark makes it harder to read since it's a Option<Result<...>>
+    #[allow(clippy::question_mark)]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.txn.current_root.is_none() {
+            return None;
+        }
+
+        // this is a mess, but it's going to be rewritten anyway
+        if self.current_leaf.is_none() {
+            match (self.range.start_bound(), self.range.end_bound()) {
+                (Bound::Included(start), Bound::Included(end)) if start.borrow() > end.borrow() => {
+                    return None
+                }
+                (Bound::Excluded(start), Bound::Excluded(end))
+                    if start.borrow() >= end.borrow() =>
+                {
+                    return None
+                }
+                _ => {}
+            }
+
+            if let Err(e) = self.setup_stack() {
+                return Some(Err(e));
+            }
+        }
+
+        let (idx, leaf) = self.current_leaf.as_mut().unwrap();
+        if let Some(child_key) = leaf.keys.get(*idx) {
+            match self.range.end_bound() {
+                Bound::Included(key) if child_key <= key.borrow() => {
+                    let child = &leaf.children[*idx];
+                    *idx += 1;
+                    return Some(Ok((child_key, child)));
+                }
+                Bound::Excluded(key) if child_key < key.borrow() => {
+                    let child = &leaf.children[*idx];
+                    *idx += 1;
+                    return Some(Ok((child_key, child)));
+                }
+                Bound::Unbounded => {
+                    let child = &leaf.children[*idx];
+                    *idx += 1;
+
+                    return Some(Ok((child_key, child)));
+                }
+                _ => return None,
+            }
+        } else {
+            // We have reached the end of this leaf node.
+            // Pop until we find a parent node with a next child index.
+            loop {
+                let Some((parent_idx, parent_node)) = self.stack.last_mut() else {
+                    return None;
+                };
+
+                let children_len = match parent_node {
+                    StackItem::Node(node) => node.children.len(),
+                    StackItem::Stored(node) => node.children.len(),
+                };
+
+                if *parent_idx + 1 == children_len {
+                    match self.stack.pop() {
+                        Some(_) => continue,
+                        None => return None,
+                    }
+                } else {
+                    *parent_idx += 1;
+                    break;
+                }
+            }
+        }
+
+        loop {
+            let Some((parent_idx, parent_node)) = self.stack.last() else {
+                return None;
+            };
+
+            match parent_node {
+                StackItem::Node(node) => match &node.children[*parent_idx] {
+                    NodeRef::Inner(child) => {
+                        self.stack.push((0, StackItem::Node(child)));
+                    }
+                    NodeRef::Leaf(leaf) => {
+                        self.current_leaf = Some((0, leaf));
+                        return self.next();
+                    }
+                    NodeRef::Stored(stored_idx) => {
+                        let Ok(node) = self.txn.data_store.get(*stored_idx) else {
+                            return Some(Err(BTreeError::from("stored node not found")));
+                        };
+
+                        match node {
+                            InnerOuter::Inner(node) => {
+                                self.stack.push((0, StackItem::Stored(node)));
+                            }
+                            InnerOuter::Outer(leaf) => {
+                                self.current_leaf = Some((0, leaf));
+                                return self.next();
+                            }
+                        }
+                    }
+                },
+                StackItem::Stored(node) => {
+                    match self.txn.data_store.get(node.children[*parent_idx]) {
+                        Ok(InnerOuter::Inner(node)) => {
+                            self.stack.push((0, StackItem::Stored(node)));
+                        }
+                        Ok(InnerOuter::Outer(leaf)) => {
+                            self.current_leaf = Some((0, leaf));
+                            return self.next();
+                        }
+                        Err(e) => {
+                            return Some(Err(BTreeError::from(e.to_string())));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// TODO merge these tests with the tests in btree-test-utils
 #[cfg(test)]
 mod test {
+    use std::ops::RangeBounds;
+
     use alloc::collections::btree_map::BTreeMap;
 
     use proptest::prelude::*;
 
-    use crate::{db::MemoryDb, transaction::Transaction};
+    use crate::{db::MemoryDb, transaction::Transaction, Store};
 
     #[derive(Clone, Debug)]
     enum Op {
@@ -706,12 +969,31 @@ mod test {
         Delete(u32),
         GetFirstKeyValue,
         GetLastKeyValue,
+        IterAll,
+        IterRange(Option<u32>, Option<u32>),
     }
 
-    fn run_operations(operations: Vec<Op>) {
+    fn iter_test<S: Store<Key = u32, Value = u32>>(
+        range: impl RangeBounds<u32> + Clone,
+        txn: &Transaction<S>,
+        std: &BTreeMap<u32, u32>,
+    ) {
+        let mut txn_iter = txn.range(range.clone()).enumerate();
+
+        for res_std in std.range(range).enumerate() {
+            let (i_txn, res_txn) = txn_iter.next().expect("to few elements");
+            let res_txn = res_txn.expect("txn error");
+
+            assert_eq!((i_txn, res_txn), res_std);
+        }
+    }
+
+    fn run_operations(mut operations: Vec<Op>) {
         let mut txn_btree =
             Transaction::new_snapshot_builder_txn(Default::default(), MemoryDb::default());
         let mut std_btree = BTreeMap::new();
+
+        operations.push(Op::IterAll);
 
         for op in operations {
             match op {
@@ -749,6 +1031,32 @@ mod test {
                     assert_eq!(res_txn, res_std,
                         "get last key value failed, merkle btree returned {:?}, btreemap returned {:?}",
                         res_txn, res_std);
+                }
+                Op::IterAll => {
+                    let mut txn_iter = txn_btree.iter().enumerate();
+
+                    for res_std in std_btree.iter().enumerate() {
+                        let (i_txn, res_txn) = txn_iter.next().expect("to few elements");
+                        let res_txn = res_txn.expect("txn error");
+
+                        assert_eq!((i_txn, res_txn), res_std);
+                    }
+                }
+                Op::IterRange(start, end) => {
+                    if let (Some(start), Some(end)) = (start, end) {
+                        if start > end {
+                            assert!(txn_btree.range(start..end).next().is_none());
+
+                            return;
+                        }
+                    }
+
+                    match (start, end) {
+                        (Some(start), Some(end)) => iter_test(start..end, &txn_btree, &std_btree),
+                        (Some(start), None) => iter_test(start.., &txn_btree, &std_btree),
+                        (None, Some(end)) => iter_test(..end, &txn_btree, &std_btree),
+                        (None, None) => iter_test(.., &txn_btree, &std_btree),
+                    };
                 }
             }
         }
@@ -1026,7 +1334,20 @@ mod test {
             Op::Delete(9982),
             Op::Delete(9970),
             Op::GetLastKeyValue,
+            Op::IterRange(None, None),
+            Op::IterRange(Some(0), None),
+            Op::IterRange(None, Some(0)),
+            Op::IterRange(Some(0), Some(0)),
+            Op::IterRange(Some(1), Some(1)),
+            Op::IterRange(Some(1), Some(10)),
+            Op::IterRange(Some(10), None),
         ];
+        run_operations(operations);
+    }
+
+    #[test]
+    fn test_hardcoded_17_insert_delete_last_key_iter() {
+        let operations = vec![Op::Insert(1, 0), Op::Insert(2, 0), Op::IterAll];
         run_operations(operations);
     }
 
@@ -1034,11 +1355,13 @@ mod test {
         #[test]
         fn test_merkle_btree_txn_against_btreemap(operations in proptest::collection::vec(
             prop_oneof![
-                (0..10000u32, any::<u32>()).prop_map(|(k, v)| Op::Insert(k, v)),
-                (0..10000u32).prop_map(Op::Get),
-                (0..10000u32).prop_map(Op::Delete),
-                Just(Op::GetFirstKeyValue),
-                Just(Op::GetLastKeyValue),
+                100 => (0..10000u32, any::<u32>()).prop_map(|(k, v)| Op::Insert(k, v)),
+                50 => (0..10000u32).prop_map(Op::Get),
+                50 => (0..10000u32).prop_map(Op::Delete),
+                20 => Just(Op::GetFirstKeyValue),
+                20 => Just(Op::GetLastKeyValue),
+                10 => Just(Op::IterAll),
+                15 => (proptest::option::of(0..10000u32), proptest::option::of(0..10000u32)).prop_map(|(start, end)| Op::IterRange(start, end)),
             ],
             1..10_000
         )) {

@@ -9,3 +9,4 @@ proptest-derive = { version = "0.5" }
 proptest = { version = "1" }
 sha2 = "0.10"
 arbitrary = { version = "1", features = ["derive"] }
+itertools = "0.14.0"

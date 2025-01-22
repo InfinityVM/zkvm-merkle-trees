@@ -13,11 +13,12 @@ serde = ["dep:serde", "arrayvec/serde"]
 kairos-trie = { path = "../kairos-trie" }
 
 arrayvec = { version = "0.7", default-features = false }
-imbl = "3.0.0"
+imbl = "4"
 serde = { version = "1", default-features = false, features = [
   "derive",
   "alloc",
 ], optional = true }
+smallvec = "1"
 
 [dev-dependencies]
 btree-test-utils = { path = "./btree-test-utils" }
