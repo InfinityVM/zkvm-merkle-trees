@@ -28,6 +28,23 @@ pub struct Transaction<S: Store> {
     current_root: Option<NodeRef<S::Key, S::Value>>,
 }
 
+/// # Safety
+///
+/// This impl is needed to work around `SnapshotBuilder` having a `RefCell`.
+/// This impl would not be safe on `SnapshotBuilder<K, V, Db>` directly.
+///
+/// The safety of this impl is reliant on the following:
+/// - SnapshotBuilder` is directly owned by the `Transaction` and not behind an `Rc` or `Arc`.
+/// - The RefCell in SnapshotBuilder is the only thing that prevents the `SnapshotBuilder` from having an auto impl of Send.
+/// - The references returned by the `SnapshotBuilder::get` are only ever short lived (enforced by the lifetime).
+unsafe impl<K, V, Db> Send for Transaction<SnapshotBuilder<K, V, Db>>
+where
+    K: Send + Ord + Clone + PortableHash,
+    V: Send + Clone + PortableHash,
+    Db: Send + DatabaseGet<K, V> + DatabaseSet<K, V>,
+{
+}
+
 impl<S: Store> Transaction<S> {
     pub fn new(data_store: S) -> Self {
         Self {
