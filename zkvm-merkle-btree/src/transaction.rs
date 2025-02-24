@@ -36,7 +36,12 @@ pub struct Transaction<S: Store> {
 /// The safety of this impl is reliant on the following:
 /// - SnapshotBuilder` is directly owned by the `Transaction` and not behind an `Rc` or `Arc`.
 /// - The RefCell in SnapshotBuilder is the only thing that prevents the `SnapshotBuilder` from having an auto impl of Send.
+/// - Everything in the `RefCell` is append only, and the data types are `Send + Clone`.
 /// - The references returned by the `SnapshotBuilder::get` are only ever short lived (enforced by the lifetime).
+///   The lifetime returned by `SnapshotBuilder::get` enforces that reference cannot outlive SnapshotBuilder.
+///   Given this the if SnapshotBuilder moves the lifetime is invalidated by the borrow checker.
+///
+/// Given these conditions we can clone and move or directly move a `Transaction<SnapshotBuilder<K, V, Db>>` to another thread.
 unsafe impl<K, V, Db> Send for Transaction<SnapshotBuilder<K, V, Db>>
 where
     K: Send + Ord + Clone + PortableHash,
