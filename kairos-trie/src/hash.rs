@@ -223,6 +223,50 @@ impl PortableHash for &String {
     }
 }
 
+impl<T: PortableHash> PortableHash for &Option<T> {
+    #[inline]
+    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
+        match self {
+            Some(value) => {
+                hasher.portable_update([1]);
+                value.portable_hash(hasher);
+            }
+            None => {
+                hasher.portable_update([0]);
+            }
+        }
+    }
+}
+
+impl<T: PortableHash> PortableHash for Option<T> {
+    #[inline]
+    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
+        (&self).portable_hash(hasher);
+    }
+}
+
+impl<T: PortableHash> PortableHash for &Result<T, T> {
+    #[inline]
+    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
+        match self {
+            Ok(value) => {
+                hasher.portable_update([1]);
+                value.portable_hash(hasher);
+            }
+            Err(value) => {
+                hasher.portable_update([0]);
+                value.portable_hash(hasher);
+            }
+        }
+    }
+}
+
+impl<T: PortableHash> PortableHash for Result<T, T> {
+    #[inline]
+    fn portable_hash<H: PortableUpdate>(&self, hasher: &mut H) {
+        (&self).portable_hash(hasher);
+    }
+}
 macro_rules! impl_portable_hash {
     ($($t:ty),+) => {
         $(
